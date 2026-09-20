@@ -1,0 +1,9 @@
+{
+  "domain": "roborock_b01",
+  "name": "Roborock B01 (Q7/Q10) Full Support",
+  "version": "1.0.0",
+  "documentation": "https://github.com/Python-roborock/python-roborock/blob/main/docs/DEVICES.md",
+  "dependencies": ["roborock"],
+  "codeowners": [],
+  "iot_class": "cloud_polling"
+}
