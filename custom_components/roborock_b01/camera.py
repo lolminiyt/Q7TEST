@@ -19,6 +19,7 @@ import logging
 from datetime import timedelta
 
 from homeassistant.components.camera import Camera
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
@@ -31,11 +32,29 @@ _LOGGER = logging.getLogger(__name__)
 _RESCAN_DELAY = timedelta(seconds=60)
 
 
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Create map cameras for the UI config entry (proper unload support)."""
+    await _async_setup_b01_cameras(hass, async_add_entities, entry)
+
+
 async def async_setup_platform(
     hass: HomeAssistant,
     config: ConfigType,
     async_add_entities: AddEntitiesCallback,
     discovery_info: DiscoveryInfoType | None = None,
+) -> None:
+    """Create map cameras for YAML setup (legacy fallback)."""
+    await _async_setup_b01_cameras(hass, async_add_entities, None)
+
+
+async def _async_setup_b01_cameras(
+    hass: HomeAssistant,
+    async_add_entities: AddEntitiesCallback,
+    entry: ConfigEntry | None,
 ) -> None:
     """Create map cameras for every B01 coordinator, present and future."""
     known: set[str] = set()
@@ -55,25 +74,28 @@ async def async_setup_platform(
         _add(coord, isinstance(coord, RoborockB01Q7UpdateCoordinator))
 
     def _scan(_now=None) -> None:
-        for entry in hass.config_entries.async_entries("roborock"):
-            coordinators = getattr(entry, "runtime_data", None)
+        for rob_entry in hass.config_entries.async_entries("roborock"):
+            coordinators = getattr(rob_entry, "runtime_data", None)
             if coordinators is None:
                 continue
             for coord in coordinators.b01_q7:
                 _add(coord, True)
             for coord in coordinators.b01_q10:
                 _add(coord, False)
-            entry.async_on_unload(
-                async_dispatcher_connect(
-                    hass,
-                    f"roborock_coordinator_added_{entry.entry_id}",
-                    _late,
-                )
+            unsub = async_dispatcher_connect(
+                hass,
+                f"roborock_coordinator_added_{rob_entry.entry_id}",
+                _late,
             )
+            # Tie listener lifetime to our own entry when set up via UI.
+            if entry is not None:
+                entry.async_on_unload(unsub)
 
     _scan()
     # Re-scan once in case the core entry finished after us.
-    async_call_later(hass, _RESCAN_DELAY, _scan)
+    remove_rescan = async_call_later(hass, _RESCAN_DELAY, _scan)
+    if entry is not None:
+        entry.async_on_unload(remove_rescan)
 
 
 class B01MapCamera(Camera):

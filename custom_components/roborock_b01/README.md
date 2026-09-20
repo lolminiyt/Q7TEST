@@ -46,16 +46,20 @@ On Q10: `roborock.get_maps` (rooms from `api.map.rooms`, flag from
 
 ## Install
 
-1. Copy `custom_components/roborock_b01/` to `/config/custom_components/`.
-2. If you installed the earlier `q7bf_map_patch`, **remove it** (this
-   supersedes it) and drop `q7bf_map_patch:` from `configuration.yaml`.
-3. Add to `/config/configuration.yaml`:
-   ```yaml
-   roborock_b01:
-   ```
+Via UI (preferred):
+
+1. Copy `custom_components/roborock_b01/` to `/config/custom_components/`
+   (or install via HACS custom repository).
+2. Restart HA.
+3. Settings → Devices & Services → **Add Integration** → **Roborock B01**
+   → Submit. No credentials — it reuses the official Roborock session.
 4. Restart HA. Log should show:
    `roborock_b01: vacuum patches applied: [...]`
 5. Check for `camera.roborock_q7_bf_map`.
+
+YAML alternative: `roborock_b01:` in `configuration.yaml` + restart.
+Use one method, not both (the UI entry is canonical; YAML is skipped
+when an entry exists).
 
 ## Test order
 

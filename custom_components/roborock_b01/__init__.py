@@ -17,6 +17,9 @@ Built from python-roborock docs/DEVICES.md, B01 protocol section:
 NO extra login: this package reuses the already-authenticated HA core
 Roborock session (config entry runtime_data coordinators). The official
 Roborock integration must be set up first.
+
+Setup: UI (config entry, preferred) or `roborock_b01:` YAML. The UI entry
+is canonical; YAML is skipped when an entry exists to avoid duplicates.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ import logging
 
 import voluptuous as vol
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.discovery import async_load_platform
 from homeassistant.helpers.typing import ConfigType
@@ -32,17 +36,41 @@ from homeassistant.helpers.typing import ConfigType
 _LOGGER = logging.getLogger(__name__)
 
 DOMAIN = "roborock_b01"
+PLATFORMS = ["camera"]
 
 CONFIG_SCHEMA = vol.Schema({vol.Optional(DOMAIN): {}}, extra=vol.ALLOW_EXTRA)
 
 
-async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Set up B01 vacuum patches + live map cameras."""
+async def _async_common_setup(hass: HomeAssistant) -> None:
+    """Apply B01 vacuum patches once per startup."""
+    if hass.data.setdefault(DOMAIN, {}).get("ready"):
+        return
+    hass.data[DOMAIN]["ready"] = True
     from .vacuum import patch_b01_vacuum_classes
 
     patched = patch_b01_vacuum_classes()
     _LOGGER.info("roborock_b01: vacuum patches applied: %s", patched)
 
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Set up via YAML (legacy fallback; skipped when a UI entry exists)."""
+    if DOMAIN not in config:
+        return True
+    if hass.config_entries.async_entries(DOMAIN):
+        return True
+    await _async_common_setup(hass)
     # Camera platform creates push-driven B01 map cameras (see camera.py).
     await async_load_platform(hass, "camera", DOMAIN, {}, config)
     return True
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up via UI config entry."""
+    await _async_common_setup(hass)
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload UI config entry (removes map cameras)."""
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

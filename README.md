@@ -12,11 +12,13 @@ Roborock integration. Set up the official integration first.
 1. HACS → Integrations → ⋮ menu → **Custom repositories**
 2. Paste this repo URL, category **Integration**, Add
 3. Find **Roborock B01 (Q7/Q10) Full Support** in HACS → Install
-4. Add to `/config/configuration.yaml`:
-   ```yaml
-   roborock_b01:
-   ```
-5. Restart Home Assistant
+4. Restart Home Assistant
+5. Settings → Devices & Services → **Add Integration** → **Roborock B01**
+   → Submit (no login — it reuses the official Roborock integration,
+   which must already be set up)
+
+YAML alternative (no UI entry): add `roborock_b01:` to
+`configuration.yaml` and restart. Use one method, not both.
 
 ## What you get (Q7 BF and friends)
 

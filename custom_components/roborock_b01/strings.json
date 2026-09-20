@@ -1,3 +1,14 @@
 {
-  "title": "Roborock B01 (Q7/Q10) full support"
+  "title": "Roborock B01 (Q7/Q10) full support",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Roborock B01",
+        "description": "Enable full Q7/Q10 map, room, position and live-map camera support on top of the official Roborock integration. No login needed — it reuses that integration's session."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Already set up. A single instance covers all B01 vacuums."
+    }
+  }
 }
