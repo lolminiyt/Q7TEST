@@ -50,6 +50,7 @@ import asyncio
 import logging
 
 from .const import DOMAIN
+from .failsafe import assert_q7_command_allowed, async_with_retry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -102,8 +103,8 @@ def patch_b01_vacuum_classes() -> list[str]:
         """Current map + rooms in the V1 get_maps response shape."""
         api = self.coordinator.api
         try:
-            await api.map.refresh()
-            await api.map_content.refresh()
+            await async_with_retry("get_map_list", api.map.refresh)
+            await async_with_retry("upload_by_mapid", api.map_content.refresh)
         except RoborockException as err:
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
@@ -138,17 +139,30 @@ def patch_b01_vacuum_classes() -> list[str]:
     async def q7_async_clean_segments(
         self, segment_ids: list[str], **kwargs
     ) -> None:
-        """Clean rooms by id via the library's SET_ROOM_CLEAN wrapper."""
+        """Clean rooms by id via the library's SET_ROOM_CLEAN wrapper.
+
+        Failsafe: empty or malformed ids are refused before anything
+        goes on the wire, and the (atomic) device command is retried
+        on transient failures - never half-applied.
+        """
         try:
             ids = [int(str(seg).strip()) for seg in segment_ids]
-        except ValueError as err:
+        except (TypeError, ValueError) as err:
             raise ServiceValidationError(
                 translation_domain=DOMAIN,
                 translation_key="invalid_segment",
-                translation_placeholders={"segments": ", ".join(segment_ids)},
+                translation_placeholders={"segments": str(segment_ids)},
             ) from err
+        if not ids:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="invalid_segment",
+                translation_placeholders={"segments": "(empty)"},
+            )
         try:
-            await self.coordinator.api.clean_segments(ids)
+            await async_with_retry(
+                "clean_segments", self.coordinator.api.clean_segments, ids
+            )
         except RoborockException as err:
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
@@ -160,8 +174,8 @@ def patch_b01_vacuum_classes() -> list[str]:
         """Robot x/y (map pixel coordinates) from the parsed live map."""
         api = self.coordinator.api
         try:
-            await api.map.refresh()
-            await api.map_content.refresh()
+            await async_with_retry("get_map_list", api.map.refresh)
+            await async_with_retry("upload_by_mapid", api.map_content.refresh)
         except RoborockException as err:
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
@@ -219,8 +233,8 @@ def patch_b01_vacuum_classes() -> list[str]:
         """Current map + rooms from the push-driven Q10 map trait."""
         api = self.coordinator.api
         try:
-            await api.map.refresh()
-            await api.maps.refresh()
+            await async_with_retry("request_dps", api.map.refresh)
+            await async_with_retry("get_map_list", api.maps.refresh)
         except RoborockException as err:
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
@@ -254,5 +268,41 @@ def patch_b01_vacuum_classes() -> list[str]:
     # and is deliberately not touched (writing the class attribute is
     # the same release-shape landmine the Q7 patch just avoided). The
     # service handler's capability check is the runtime gate.
+
+    # ====================== Q7 wire guard ======================
+    # Wrap the concrete Q7 channel's two outgoing methods so no command
+    # that can destroy/corrupt the saved map (or an unverified point/
+    # zone payload) can ever leave Home Assistant - regardless of which
+    # integration, script or UI sends it. The channel instances used by
+    # HA are built by the library factory; the factory wrapper marks
+    # every channel it returns as guarded.
+    from roborock.devices.rpc import b01_q7_channel as _q7_channel_mod
+    from roborock.devices.rpc.b01_q7_channel import B01Q7Channel
+
+    if not getattr(B01Q7Channel, "_b01_wire_guard", False):
+        B01Q7Channel._b01_wire_guard = True
+        _orig_send_command = B01Q7Channel.send_command
+        _orig_send_map_command = B01Q7Channel.send_map_command
+
+        async def _guarded_send_command(self, command, params=None):
+            assert_q7_command_allowed(command)
+            return await _orig_send_command(self, command, params)
+
+        async def _guarded_send_map_command(self, command, params=None):
+            assert_q7_command_allowed(command)
+            return await _orig_send_map_command(self, command, params)
+
+        B01Q7Channel.send_command = _guarded_send_command
+        B01Q7Channel.send_map_command = _guarded_send_map_command
+
+        _orig_create_channel = _q7_channel_mod.create_b01_q7_channel
+
+        def _guarding_create_b01_q7_channel(device, product, mqtt_channel):
+            channel = _orig_create_channel(device, product, mqtt_channel)
+            channel._b01_command_guard = True
+            return channel
+
+        _q7_channel_mod.create_b01_q7_channel = _guarding_create_b01_q7_channel
+    applied.append("Q7.wire_guard")
 
     return applied

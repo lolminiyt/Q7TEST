@@ -43,9 +43,11 @@ def _async_apply_once(hass: HomeAssistant) -> bool:
     """Apply vacuum patches and register services (idempotent)."""
     data = hass.data.setdefault(DOMAIN, {})
     if not data.get("_b01_patched"):
+        from .issues import async_setup_issue_reporter
         from .vacuum import patch_b01_vacuum_classes
 
         _LOGGER.info("roborock_b01: patches applied: %s", patch_b01_vacuum_classes())
+        data["_b01_unsub_issues"] = async_setup_issue_reporter(hass)
         data["_b01_patched"] = True
         return True
     return False
@@ -57,20 +59,26 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         return True
     if hass.config_entries.async_entries(DOMAIN):
         return True
+    from .area_mapping import async_setup_area_mapping_keeper
     from .services import async_register_services
 
     _async_apply_once(hass)
     async_register_services(hass)
+    async_setup_area_mapping_keeper(hass, None)
     await async_load_platform(hass, "camera", DOMAIN, {}, config)
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up via UI config entry."""
+    from .area_mapping import async_setup_area_mapping_keeper
     from .services import async_register_services
 
     _async_apply_once(hass)
     async_register_services(hass)
+    # Reconcile the segment-to-area mapping (backup / restore / auto-map)
+    # whenever a B01 coordinator shows up, now or in the future.
+    async_setup_area_mapping_keeper(hass, entry)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 

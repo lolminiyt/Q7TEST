@@ -34,6 +34,57 @@ device - no duplicates):
   upstream and community sources).
 - `roborock_b01.clean_segment` service (works even where the core
   segment-repair UI flow is unavailable).
+- `binary_sensor.<name>_protection` - "on" when a command was blocked
+  or the device is unreachable; attributes show the last blocked
+  command, failure details and running totals (feeds the dashboard's
+  Protection card).
+- `roborock_b01.clean_settings` service - set **suction power** (quiet,
+  balanced, turbo, max, max_plus), **water flow** (low, medium, high),
+  **clean mode** (vacuum / vac_and_mop / mop), **repeat cycles** (one,
+  two) and **cleaning route** (balanced, deep). Q7 only; every value is
+  validated with the library's own enums and sent with its verified
+  `prop.set` wrappers.
+
+## Failsafes
+
+- **Bounded retries** - every device command and map read is retried
+  (2 retries with backoff) on transient failures; the cloud link is
+  MQTT and a single timeout can happen. Persistent failure still fails
+  fast with a clear error - commands are never half-applied.
+- **Map-protection wire guard** - the integration refuses to put any
+  map-destroying command on the wire (`DEL_MAP`, `REPLACE_MAP`,
+  `SET_CUR_MAP`, `RENAME_MAP`, room structure changes like
+  `SPLIT_ROOM`/`ARRANGE_ROOM`/`RENAME_ROOM(S)`, schedule deletion, and
+  the unverified Q7 point/zone payloads). Blocking happens at the
+  device channel, so no integration, script or dashboard can wipe your
+  map through Home Assistant. The Roborock app is not affected.
+- **Mapping keeper is read-mostly** - it only ever writes the mapping
+  when the registry entry has none (restore/auto-map) or filters out
+  robot-reported room ids you never mapped; a healthy mapping is only
+  copied to backup, never rewritten.
+
+## "Area mapping is not configured"
+
+The built-in `vacuum.clean_area` action needs a one-time
+**segment-to-area mapping** saved in the entity registry. Open the
+vacuum entity's settings dialog in the UI (the same dialog that shows
+the segment mapping editor) and save the mapping once.
+
+The integration also **protects that mapping**:
+
+- It is backed up to `.storage/roborock_b01_area_mapping` whenever it
+  exists, and **restored automatically** if the entity registry entry
+  is ever rebuilt (re-added Roborock integration, registry restore).
+- If no mapping exists anywhere, rooms are **auto-mapped to HA areas
+  by name**: a robot room called "Kitchen" maps to the "Kitchen"
+  area (exact or containing match, case-insensitive, longest match
+  wins; unmatched rooms are left out rather than guessed).
+- Watch the log for `roborock_b01: restoring segment-to-area mapping`
+  or `roborock_b01: auto-mapped robot rooms` after startup.
+
+Meanwhile, `roborock_b01.clean_segment` cleans rooms by id with no
+mapping at all, and the dashboard in `dashboard/` ships ready-made
+room buttons that use it.
 
 ## Install
 

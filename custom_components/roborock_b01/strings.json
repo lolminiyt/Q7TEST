@@ -25,6 +25,46 @@
           "description": "One or more room/segment ids, e.g. [16] or [16, 17]."
         }
       }
+    },
+    "clean_settings": {
+      "name": "Clean settings",
+      "description": "Set suction power, water flow, cleaning mode (vacuum / vacuum+mop / mop), repeat cycles and cleaning route on a B01 Q7 vacuum. All fields are optional; only the ones you pass are changed.",
+      "fields": {
+        "entity_id": {
+          "name": "Entity",
+          "description": "The vacuum entity (vacuum. ...)."
+        },
+        "fan_speed": {
+          "name": "Suction power",
+          "description": "One of: quiet, balanced, turbo, max, max_plus."
+        },
+        "water_level": {
+          "name": "Water flow",
+          "description": "One of: low, medium, high."
+        },
+        "clean_mode": {
+          "name": "Cleaning mode",
+          "description": "One of: vacuum, vac_and_mop, mop."
+        },
+        "repeat": {
+          "name": "Repeat cycles",
+          "description": "One of: one, two."
+        },
+        "clean_route": {
+          "name": "Cleaning route",
+          "description": "One of: balanced, deep."
+        }
+      }
+    }
+  },
+  "issues": {
+    "blocked_command": {
+      "title": "Blocked command: {command}",
+      "description": "Something in Home Assistant (a script, automation or\nanother integration) tried to send the command `{command}`, which\ncould delete, replace or corrupt the robot's saved map or rooms.\nThe integration refused it before anything left Home Assistant -\nthe map and rooms are untouched. If you did this on purpose, the\ncommand is on the integration's map-protection blocklist and cannot\nbe run through Home Assistant; use the Roborock app instead."
+    },
+    "device_failures": {
+      "title": "Roborock device unreachable ({failures} failed commands)",
+      "description": "Several commands in a row failed even after automatic\nretries. The robot may be offline, asleep, or out of cloud reach.\nThis clears itself automatically on the next successful command."
     }
   },
   "exceptions": {

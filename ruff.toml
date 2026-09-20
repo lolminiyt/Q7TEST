@@ -3,6 +3,9 @@ combine-as-imports = true
 
 # BLE001 (blind except) is deliberate in the map camera: trait/protocol
 # errors are already logged as RoborockException upstream, and a camera
-# must never crash on a bad frame.
+# must never crash on a bad frame. The area-mapping keeper uses the same
+# guard around the device round-trip: any failure means "leave the
+# registry alone", never crash setup.
 [lint.per-file-ignores]
 "custom_components/roborock_b01/camera.py" = ["BLE001"]
+"custom_components/roborock_b01/area_mapping.py" = ["BLE001"]
