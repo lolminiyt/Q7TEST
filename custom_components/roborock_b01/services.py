@@ -103,6 +103,12 @@ def async_register_services(hass: HomeAssistant) -> None:
                 + ", ".join(sorted(_CLEAN_SETTINGS_FIELDS))
             )
 
+        def _invalid(field: str, value: object, mapping) -> ServiceValidationError:
+            return ServiceValidationError(
+                f"{field} '{value}' is not valid. Use one of: "
+                f"{', '.join(mapping.keys())}"
+            )
+
         resolved: dict[str, object] = {}
         for field, value in requested.items():
             if not isinstance(value, str):
@@ -113,19 +119,20 @@ def async_register_services(hass: HomeAssistant) -> None:
             try:
                 resolved[field] = mappings[field].from_value(value)
             except ValueError as err:
-                raise ServiceValidationError(
-                    f"{field} '{value}' is not valid. Use one of: "
-                    f"{', '.join(mappings[field].keys())}"
-                ) from err
+                raise _invalid(field, value, mappings[field]) from err
+            except KeyError as err:
+                raise _invalid(field, value, mappings[field]) from err
 
         for entity in await _async_target_vacuum_entities(hass, call):
-            api = getattr(getattr(entity, "coordinator", None), "api", None)
+            coordinator = getattr(entity, "coordinator", None)
+            api = getattr(coordinator, "api", None)
             if api is None or not hasattr(api, "set_fan_speed"):
                 raise HomeAssistantError(
                     f"{entity.entity_id}: clean_settings is only available "
                     "on B01 Q7 vacuums (the Q10 has no setters in "
                     "python-roborock yet)"
                 )
+            applied_any = False
             for field, value in resolved.items():
                 try:
                     await async_with_retry(
@@ -138,6 +145,11 @@ def async_register_services(hass: HomeAssistant) -> None:
                         f"{entity.entity_id}: the device rejected "
                         f"{field}={requested[field]}"
                     ) from err
+                applied_any = True
+            if applied_any:
+                # The vacuum UI reads coordinator.data (wind_name, ...); a
+                # write alone leaves it stale for up to a minute.
+                await coordinator.async_refresh()
 
     hass.services.async_register(
         DOMAIN,

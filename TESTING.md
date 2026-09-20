@@ -20,8 +20,8 @@ your phone. **Q7** covers BF/TF/M5/L5 (pv=B01); **Q10** the Q10 series.
 
 ```
 roborock_b01: patches applied: ['Q7.get_maps', 'Q7.get_segments',
-'Q7.clean_segments', 'Q7.position', 'Q7.CLEAN_AREA', 'Q10.get_maps',
-'Q10.CLEAN_AREA']
+'Q7.clean_segments', 'Q7.position', 'Q7.fan_speed_refresh',
+'Q7.CLEAN_AREA', 'Q10.get_maps', 'Q10.CLEAN_AREA']
 ```
 
 (Only your model's entries matter.)
@@ -67,16 +67,35 @@ maps:
 cleans **only that room**. Stop early anytime with `vacuum.stop` or
 `vacuum.return_to_base`.
 
+**Failsafe:** before every room clean, the integration fetches the
+robot's current room list and refuses wrong ids **before anything is
+sent** - the robot can no longer fall back to a full-house clean on
+unknown ids (its firmware behavior). The refusal names the bad id and
+all valid rooms, e.g. `Room id(s) 99 do not exist on the robot's
+current map ... Valid rooms: 16=Kitchen, 17=Bedroom`. If the map can't
+be read, the clean is refused too (fail-closed, never gambled).
+
+## 5b. Prove the failsafe (safe to try)
+
+**Do:** run `roborock_b01.clean_segment` with a fake id like `999`.
+
+**Expect:** an instant refusal (nothing reaches the robot - the
+protection sensor stays quiet because nothing was blocked by the wire
+guard, this is a validation refusal) with the valid room list in the
+error. Watch the robot: it must do **nothing**.
+
 ## 6. Settings: suction / water / mode / cycles / route
 
 **Do:** Developer Tools -> Actions -> `roborock_b01.clean_settings` ->
 your vacuum -> `fan_speed: max` -> Run. Repeat with `water_level: high`,
 `clean_mode: vacuum`, `repeat: two`, `clean_route: deep`.
 
-**Working:** each call is accepted after ~1-2 s and the Roborock app
-shows the changed setting on the device's clean-settings screen.
-Invalid values are rejected with a clear message listing the allowed
-ones. (Q10: not supported yet - the library has no setters.)
+**Working:** each call is accepted after ~1-2 s, the vacuum card's
+fan-speed state updates **immediately** (a coordinator refresh runs
+right after every successful write - no more waiting for the one-minute
+poll), and the Roborock app shows the changed setting. Invalid values
+are rejected with a clear message listing the allowed ones. (Q10: not
+supported yet - the library has no setters.)
 
 ## 7. `roborock.get_vacuum_current_position`
 

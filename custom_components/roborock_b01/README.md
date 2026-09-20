@@ -84,7 +84,11 @@ The integration also **protects that mapping**:
 
 Meanwhile, `roborock_b01.clean_segment` cleans rooms by id with no
 mapping at all, and the dashboard in `dashboard/` ships ready-made
-room buttons that use it.
+room buttons that use it. Room ids are verified against the robot's
+current map before sending - unknown or stale ids are refused with the
+valid-room list instead of triggering the device's full-house fallback
+(the Q7 firmware silently cleans everything when SET_ROOM_CLEAN carries
+room ids it does not know).
 
 ## Install
 

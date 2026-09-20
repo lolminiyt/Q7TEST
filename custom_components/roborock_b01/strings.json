@@ -79,6 +79,9 @@
     },
     "invalid_segment": {
       "message": "Invalid segment id(s): {segments}. Use numeric room ids from roborock.get_maps."
+    },
+    "unknown_segment": {
+      "message": "Room id(s) {segments} do not exist on the robot's current map - the device would start a full-house clean instead. Valid rooms: {valid}. Run roborock.get_maps to refresh the list."
     }
   }
 }

@@ -60,6 +60,19 @@ _ROOMS_WAIT_TIMEOUT = 30  # seconds
 _ROOMS_POLL_INTERVAL = 1.0  # seconds
 
 
+async def _q7_current_room_ids(api) -> dict[int, str]:
+    """The room ids the robot can actually clean right now (id -> name).
+
+    Fetched from the device map (GET_MAP_LIST + UPLOAD_BY_MAPID) - the
+    same id space the SET_ROOM_CLEAN command expects. Raises
+    ``RoborockException`` when the device/map is unreachable, so a
+    transient failure can never look like "unknown room".
+    """
+    await async_with_retry("get_map_list", api.map.refresh)
+    await async_with_retry("upload_by_mapid", api.map_content.refresh)
+    return _q7_room_names(api)
+
+
 def _q7_room_names(api) -> dict[int, str]:
     """Best-effort room id -> name map for a Q7 from parsed map content."""
     rooms: dict[int, str] = {}
@@ -159,6 +172,31 @@ def patch_b01_vacuum_classes() -> list[str]:
                 translation_key="invalid_segment",
                 translation_placeholders={"segments": "(empty)"},
             )
+        # Failsafe: the device starts a FULL-HOUSE clean when SET_ROOM_CLEAN
+        # carries room ids it does not know (e.g. dashboard placeholders or
+        # a stale segment->area mapping). Verify against the robot's current
+        # room list before anything goes on the wire.
+        try:
+            known = await _q7_current_room_ids(self.coordinator.api)
+        except RoborockException as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="command_failed",
+                translation_placeholders={"command": "get_map_list"},
+            ) from err
+        unknown = [room_id for room_id in ids if room_id not in known]
+        if unknown or not known:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="unknown_segment",
+                translation_placeholders={
+                    "segments": ", ".join(str(room_id) for room_id in unknown or ids),
+                    "valid": ", ".join(
+                        f"{room_id}={name}" for room_id, name in known.items()
+                    )
+                    or "none (no map data on the robot)",
+                },
+            )
         try:
             await async_with_retry(
                 "clean_segments", self.coordinator.api.clean_segments, ids
@@ -169,13 +207,15 @@ def patch_b01_vacuum_classes() -> list[str]:
                 translation_key="command_failed",
                 translation_placeholders={"command": "clean_segments"},
             ) from err
+        # Keep the UI (fan speed, activity, ...) current instead of waiting
+        # for the next one-minute poll.
+        await self.coordinator.async_refresh()
 
     async def q7_get_vacuum_current_position(self) -> dict:
         """Robot x/y (map pixel coordinates) from the parsed live map."""
         api = self.coordinator.api
         try:
-            await async_with_retry("get_map_list", api.map.refresh)
-            await async_with_retry("upload_by_mapid", api.map_content.refresh)
+            await _q7_current_room_ids(api)
         except RoborockException as err:
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
@@ -190,15 +230,48 @@ def patch_b01_vacuum_classes() -> list[str]:
             )
         return {"x": round(pos.x), "y": round(pos.y)}
 
+    async def q7_async_set_fan_speed(self, fan_speed: str, **kwargs) -> None:
+        """Core's Q7 setter + an immediate UI refresh.
+
+        Core validates against SCWindMapping and sends via the library;
+        the only gap was the stale UI (fan_speed reads
+        coordinator.data.wind_name, updated by the one-minute poll).
+        """
+        from roborock.data.b01_q7.b01_q7_code_mappings import SCWindMapping
+
+        try:
+            fan_speed_code = SCWindMapping.from_value(fan_speed)
+        except ValueError as err:
+            raise ServiceValidationError(
+                translation_domain="roborock",
+                translation_key="invalid_fan_speed",
+                translation_placeholders={"fan_speed": fan_speed},
+            ) from err
+        try:
+            await async_with_retry(
+                "set_fan_speed",
+                self.coordinator.api.set_fan_speed,
+                fan_speed_code,
+            )
+        except RoborockException as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="command_failed",
+                translation_placeholders={"command": "set_fan_speed"},
+            ) from err
+        await self.coordinator.async_refresh()
+
     RoborockQ7Vacuum.get_maps = q7_get_maps
     RoborockQ7Vacuum.async_get_segments = q7_async_get_segments
     RoborockQ7Vacuum.async_clean_segments = q7_async_clean_segments
     RoborockQ7Vacuum.get_vacuum_current_position = q7_get_vacuum_current_position
+    RoborockQ7Vacuum.async_set_fan_speed = q7_async_set_fan_speed
     applied += [
         "Q7.get_maps",
         "Q7.get_segments",
         "Q7.clean_segments",
         "Q7.position",
+        "Q7.fan_speed_refresh",
     ]
 
     # CLEAN_AREA must be advertised for the UI room-clean picker and the
