@@ -33,7 +33,8 @@ Q10 (pv=B01) via ``coordinator.api`` = ``Q10PropertiesApi``:
 HA core (verified from source) stubs ``get_maps`` / position on the Q7
 and gives the Q7 no ``clean_segments``. This module patches exactly
 those gaps onto the core classes (idempotent; the classes are
-singletons in sys.modules) and flips the Q7's feature flags.
+singletons in sys.modules) and adds the Q7's CLEAN_AREA feature flag
+at read time (robust to all of core's feature plumbing shapes).
 
 Deliberately NOT implemented: Q7 point/zone cleaning. The library has
 no wrapper for it and no verified wire payload shape exists (checked
@@ -186,29 +187,27 @@ def patch_b01_vacuum_classes() -> list[str]:
         "Q7.position",
     ]
 
-    # CLEAN_AREA is registered against the feature flag. Core defines
-    # supported_features as a (non-data) cached_property, so an entity
-    # created before this patch - or any already-cached instance value -
-    # would keep the old flags forever. A class-level property is a data
-    # descriptor: it wins over the cached_property AND any stale
-    # per-instance cache, so every Q7 entity (present or future)
-    # advertises room cleaning regardless of integration setup order.
+    # CLEAN_AREA must be advertised for the UI room-clean picker and the
+    # service's capability check. Core's feature plumbing varies between
+    # releases: ``_attr_supported_features`` may be a plain class
+    # attribute or a class-level ``property`` (reading it at patch time
+    # crashed with "unsupported operand type(s) for |: 'property' and
+    # 'VacuumEntityFeature'"), and ``supported_features`` may be a
+    # cached_property. So nothing is read from or written to the class
+    # attribute here. Instead ``supported_features`` is replaced with a
+    # data descriptor that ORs CLEAN_AREA in at read time: it resolves
+    # whatever core keeps in ``_attr_supported_features`` per instance
+    # (instance overrides still win for the base flags) and, being a
+    # data descriptor, also defeats any stale cached_property value -
+    # so setup order does not matter.
     if not getattr(RoborockQ7Vacuum, "_b01_clean_area", False):
-        base_features = getattr(
-            RoborockQ7Vacuum, "_attr_supported_features", VacuumEntityFeature(0)
-        )
-        q7_features = base_features | VacuumEntityFeature.CLEAN_AREA
-        RoborockQ7Vacuum._attr_supported_features = q7_features
 
         def _supported_features(self):
-            """Patched by roborock_b01: adds CLEAN_AREA to the Q7.
-
-            Reads the (already OR'd) class attribute so per-instance
-            overrides keep working; being a data descriptor it also
-            defeats any stale cached_property value computed before this
-            patch loaded.
-            """
-            return self._attr_supported_features
+            """Patched by roborock_b01: adds CLEAN_AREA to the Q7."""
+            features = self._attr_supported_features
+            if not features & VacuumEntityFeature.CLEAN_AREA:
+                return features | VacuumEntityFeature.CLEAN_AREA
+            return features
 
         RoborockQ7Vacuum.supported_features = property(_supported_features)
         RoborockQ7Vacuum._b01_clean_area = True
@@ -251,12 +250,9 @@ def patch_b01_vacuum_classes() -> list[str]:
     RoborockQ10Vacuum.get_maps = q10_get_maps
     applied.append("Q10.get_maps")
 
-    # Core already supports CLEAN_AREA on the Q10; asserted here so a
-    # future core change cannot silently drop it out from under our
-    # service's capability check.
-    RoborockQ10Vacuum._attr_supported_features = (
-        RoborockQ10Vacuum._attr_supported_features | VacuumEntityFeature.CLEAN_AREA
-    )
-    applied.append("Q10.CLEAN_AREA")
+    # The Q10's CLEAN_AREA advertisement is core's own working surface
+    # and is deliberately not touched (writing the class attribute is
+    # the same release-shape landmine the Q7 patch just avoided). The
+    # service handler's capability check is the runtime gate.
 
     return applied
