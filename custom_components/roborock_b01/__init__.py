@@ -1,25 +1,24 @@
-"""Roborock B01 (Q7 / Q10) full support package.
+"""Roborock B01 (Q7 / Q10) full support.
 
-Built from python-roborock docs/DEVICES.md, B01 protocol section:
+Fills the map / room-control gaps that Home Assistant core leaves for
+B01-protocol (pv=B01) vacuums: Q7 BF/TF/M5/L5 and Q10 series.
 
-- B01 (pv=B01) devices are MQTT-only (no local TCP), DPS protocol,
-  one shared MqttSession, per-device MqttChannel + helpers
-  (b01_q7_channel.py / b01_q10_channel.py).
-- Q7: device.b01_q7_properties. The device streams full map frames on its
-  own while cleaning, so the rendered map stays current without polling:
-  register map_content.add_update_listener(cb) and read
-  image_content / map_data when notified.
-- Q10: device.b01_q10_properties with vacuum.* commands and
-  command.send() for raw DP commands.
-- DeviceManager (owned by the HA core roborock integration) detects pv
-  automatically.
+Everything reuses the already-authenticated session of the official
+Roborock integration (its coordinators expose the python-roborock
+``Q7PropertiesApi`` / ``Q10PropertiesApi``). No extra login.
 
-NO extra login: this package reuses the already-authenticated HA core
-Roborock session (config entry runtime_data coordinators). The official
-Roborock integration must be set up first.
+What is added on top of core (all implemented with library-verified
+commands, see vacuum.py):
 
-Setup: UI (config entry, preferred) or `roborock_b01:` YAML. The UI entry
-is canonical; YAML is skipped when an entry exists to avoid duplicates.
+- ``camera.<name>_map`` - live, push-driven map (no polling)
+- Room cleaning on Q7 (core has no ``clean_segments`` for the Q7 class)
+- ``roborock.get_maps`` / ``get_vacuum_current_position`` for the Q7
+- ``roborock.get_maps`` for the Q10 (its map is push-driven; core only
+  exposes the position; goto/zone on the Q10 is core-provided)
+- A ``roborock_b01.clean_segment`` service on top of the segment-repair
+  flow, which needs a platform-registered service
+
+Setup: UI (config entry, preferred) or ``roborock_b01:`` YAML.
 """
 
 from __future__ import annotations
@@ -27,46 +26,51 @@ from __future__ import annotations
 import logging
 
 import voluptuous as vol
-
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.discovery import async_load_platform
 from homeassistant.helpers.typing import ConfigType
 
-_LOGGER = logging.getLogger(__name__)
+from .const import DOMAIN, PLATFORMS
 
-DOMAIN = "roborock_b01"
-PLATFORMS = ["camera"]
+_LOGGER = logging.getLogger(__name__)
 
 CONFIG_SCHEMA = vol.Schema({vol.Optional(DOMAIN): {}}, extra=vol.ALLOW_EXTRA)
 
 
-async def _async_common_setup(hass: HomeAssistant) -> None:
-    """Apply B01 vacuum patches once per startup."""
-    if hass.data.setdefault(DOMAIN, {}).get("ready"):
-        return
-    hass.data[DOMAIN]["ready"] = True
-    from .vacuum import patch_b01_vacuum_classes
+@callback
+def _async_apply_once(hass: HomeAssistant) -> bool:
+    """Apply vacuum patches and register services (idempotent)."""
+    data = hass.data.setdefault(DOMAIN, {})
+    if not data.get("_b01_patched"):
+        from .vacuum import patch_b01_vacuum_classes
 
-    patched = patch_b01_vacuum_classes()
-    _LOGGER.info("roborock_b01: vacuum patches applied: %s", patched)
+        _LOGGER.info("roborock_b01: patches applied: %s", patch_b01_vacuum_classes())
+        data["_b01_patched"] = True
+        return True
+    return False
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Set up via YAML (legacy fallback; skipped when a UI entry exists)."""
+    """Set up via YAML (skipped when a UI entry exists)."""
     if DOMAIN not in config:
         return True
     if hass.config_entries.async_entries(DOMAIN):
         return True
-    await _async_common_setup(hass)
-    # Camera platform creates push-driven B01 map cameras (see camera.py).
+    from .services import async_register_services
+
+    _async_apply_once(hass)
+    async_register_services(hass)
     await async_load_platform(hass, "camera", DOMAIN, {}, config)
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up via UI config entry."""
-    await _async_common_setup(hass)
+    from .services import async_register_services
+
+    _async_apply_once(hass)
+    async_register_services(hass)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 

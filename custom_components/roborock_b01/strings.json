@@ -4,11 +4,41 @@
     "step": {
       "user": {
         "title": "Roborock B01",
-        "description": "Enable full Q7/Q10 map, room, position and live-map camera support on top of the official Roborock integration. No login needed — it reuses that integration's session."
+        "description": "Enable the live map camera, room cleaning and map/position data on top of the official Roborock integration. No login needed - it reuses that integration's session. Set up the official Roborock integration first."
       }
     },
     "abort": {
       "single_instance_allowed": "Already set up. A single instance covers all B01 vacuums."
+    }
+  },
+  "services": {
+    "clean_segment": {
+      "name": "Clean segment (room)",
+      "description": "Clean rooms by segment id on a B01 Q7/Q10 vacuum. Get the ids from the roborock.get_maps response. Works even where the segment repair flow is unavailable.",
+      "fields": {
+        "entity_id": {
+          "name": "Entity",
+          "description": "The vacuum entity (vacuum. ...)."
+        },
+        "segment_id": {
+          "name": "Segment ids",
+          "description": "One or more room/segment ids, e.g. [16] or [16, 17]."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "map_failure": {
+      "message": "Could not fetch the map from the device."
+    },
+    "position_not_found": {
+      "message": "The robot position is not present in the current map data."
+    },
+    "command_failed": {
+      "message": "The device rejected command '{command}'."
+    },
+    "invalid_segment": {
+      "message": "Invalid segment id(s): {segments}. Use numeric room ids from roborock.get_maps."
     }
   }
 }

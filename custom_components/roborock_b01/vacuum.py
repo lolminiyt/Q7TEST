@@ -1,241 +1,262 @@
-"""B01 vacuumentity patches for HA core RoborockQ7Vacuum / RoborockQ10Vacuum.
+"""Vacuum control patches for HA core RoborockQ7Vacuum / RoborockQ10Vacuum.
 
-B01 background (python-roborock docs/DEVICES.md):
-- Q7 (Q7 BF/TF/M5/L5, pv=B01): Q7PropertiesApi on
-  coordinator.api with map (GET_MAP_LIST), map_content
-  (UPLOAD_BY_MAPID -> MapData.rooms / vacuum_position / image_content),
-  clean_segments / start_clean / pause / stop / dock / find_me /
-  fan / water / mode / child lock / dust collection / DND.
-- Q10 (pv=B01): Q10PropertiesApi with vacuum.*, command.send(),
-  map.rooms / robot_position, maps.current_map_id.
+Ground truth for every API used here (python-roborock, verified against
+library source and its test suite, plus the HA core roborock component):
 
-Core HA leaves Q7 get_maps/position/goto/zone as ServiceNotSupported and
-gives Q7 no segments; Q10 get_maps is also ServiceNotSupported. Everything
-here reuses the authenticated core session - no extra login.
+Q7 (pv=B01) via ``coordinator.api`` = ``Q7PropertiesApi``:
+- ``clean_segments(room_ids)``  -> ``service.set_room_clean``
+  {clean_type: 1, ctrl_value: 1, room_ids: [...]}          (room clean)
+- ``start_clean()`` / ``pause_clean()`` / ``stop_clean()``
+- ``return_to_dock()`` / ``find_me()`` / ``set_fan_speed(...)``
+- ``map`` (MapTrait): ``current_map_id`` after ``refresh()``
+  (``service.get_map_list``)
+- ``map_content`` (MapContentTrait): ``refresh()``,
+  ``image_content`` (PNG bytes), ``map_data`` (vacuum_map_parser_base
+  MapData: ``vacuum_position`` {x, y, a}, ``rooms`` {id: Room},
+  ``additional_parameters['room_names']`` {id: str}) and
+  ``add_update_listener(cb)`` for unsolicited live frames.
+- The device itself streams live map frames while cleaning; the
+  subscription is started by the library when the device connects
+  (``RoborockDevice.connect`` -> ``b01_q7_properties.start()``).
+
+Q10 (pv=B01) via ``coordinator.api`` = ``Q10PropertiesApi``:
+- ``map`` (MapContentTrait): ``image_content``, ``rooms`` (list of
+  ``Q10Room(id, name)`` - ids are the segment ids), ``robot_position`` -
+  all push-driven; ``refresh()`` sends the read-only REQUEST_DPS.
+- ``maps`` (MapsTrait): ``current_map_id`` (str) after ``refresh()``.
+- Control (goto/zone/segments) is fully implemented by HA core's
+  ``RoborockQ10Vacuum`` and is NOT patched here.
+
+``SCWindMapping`` (Q7 fan levels) is a ``RoborockModeEnum`` with
+``.keys()`` and ``.from_value(name)``; core already wires it up.
+
+HA core (verified from source) stubs ``get_maps`` / position on the Q7
+and gives the Q7 no ``clean_segments``. This module patches exactly
+those gaps onto the core classes (idempotent; the classes are
+singletons in sys.modules) and flips the Q7's feature flags.
+
+Deliberately NOT implemented: Q7 point/zone cleaning. The library has
+no wrapper for it and no verified wire payload shape exists (checked
+upstream main and community captures); per this project's no-guesses
+rule, ``set_vacuum_goto_position`` / ``set_vacuum_zoned_cleaning`` are
+left unimplemented on the Q7 (calls fail with core's standard
+"not supported" error).
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
+# Time to wait for the Q10 push stream to deliver the room list after
+# kicking it with a read-only refresh.
+_ROOMS_WAIT_TIMEOUT = 30  # seconds
+_ROOMS_POLL_INTERVAL = 1.0  # seconds
+
+
+def _q7_room_names(api) -> dict[int, str]:
+    """Best-effort room id -> name map for a Q7 from parsed map content."""
+    rooms: dict[int, str] = {}
+    map_data = api.map_content.map_data
+    if map_data is None:
+        return rooms
+    named = getattr(map_data, "rooms", None) or {}
+    for room_id, room in named.items():
+        try:
+            rooms[int(room_id)] = getattr(room, "name", None) or f"Room {room_id}"
+        except (TypeError, ValueError):
+            continue
+    if rooms:
+        return rooms
+    raw_names = (getattr(map_data, "additional_parameters", None) or {}).get(
+        "room_names"
+    )
+    for room_id, name in (raw_names or {}).items():
+        try:
+            rooms[int(room_id)] = str(name)
+        except (TypeError, ValueError):
+            continue
+    return rooms
+
 
 def patch_b01_vacuum_classes() -> list[str]:
-    """Patch core B01 vacuum classes. Returns list of applied patch names."""
+    """Patch core B01 vacuum classes. Returns the applied patch names."""
     from homeassistant.components.roborock.vacuum import (
         RoborockQ7Vacuum,
         RoborockQ10Vacuum,
     )
     from homeassistant.components.vacuum import Segment, VacuumEntityFeature
-    from homeassistant.exceptions import HomeAssistantError
+    from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
     from roborock.exceptions import RoborockException
 
     applied: list[str] = []
 
-    # ---------------- Q7 ----------------
+    # ============================== Q7 ==============================
 
-    async def q7_get_maps(self):
-        """Current map + rooms in V1 get_maps shape."""
+    async def q7_get_maps(self) -> dict:
+        """Current map + rooms in the V1 get_maps response shape."""
         api = self.coordinator.api
         try:
             await api.map.refresh()
-        except RoborockException as err:
-            _LOGGER.debug("roborock_b01: Q7 map.refresh failed: %s", err)
-            raise HomeAssistantError(
-                translation_domain="roborock",
-                translation_key="map_failure",
-            ) from err
-        try:
             await api.map_content.refresh()
         except RoborockException as err:
-            _LOGGER.debug("roborock_b01: Q7 map_content.refresh failed: %s", err)
             raise HomeAssistantError(
-                translation_domain="roborock",
+                translation_domain=DOMAIN,
                 translation_key="map_failure",
             ) from err
-
+        rooms = _q7_room_names(api)
         map_id = api.map.current_map_id
-        map_data = api.map_content.map_data
-        rooms: dict[int, str] = {}
-        map_name = f"Map {map_id}" if map_id is not None else "Map 0"
-        if map_data is not None:
-            if map_data.map_name:
-                map_name = map_data.map_name
-            if map_data.rooms:
-                for rid, room in map_data.rooms.items():
-                    rooms[int(rid)] = room.name or f"Room {rid}"
-            if not rooms:
-                raw_names = (map_data.additional_parameters or {}).get(
-                    "room_names"
-                ) or {}
-                for rid, name in raw_names.items():
-                    try:
-                        rooms[int(rid)] = str(name)
-                    except (TypeError, ValueError):
-                        continue
+        map_name = f"Map {map_id}" if map_id is not None else "Map"
         return {
             "maps": [
                 {
                     "flag": map_id,
                     "name": map_name,
-                    "rooms": rooms,  # type: ignore[dict-item]
+                    "rooms": rooms,
                 }
             ]
         }
 
     async def q7_async_get_segments(self) -> list[Segment]:
-        """Rooms as vacuum segments for the room-cleaning UI."""
-        res = await q7_get_maps(self)
-        maps = res.get("maps") or []
+        """Rooms as segments for the room-cleaning UI (manual flows)."""
+        response = await q7_get_maps(self)
+        maps = response["maps"]
         if not maps:
             return []
         first = maps[0]
-        group = first.get("name")
-        rooms = first.get("rooms") or {}
+        group = first["name"]
         return [
-            Segment(id=str(rid), name=str(name), group=group)
-            for rid, name in rooms.items()
+            Segment(id=str(room_id), name=name, group=group)
+            for room_id, name in first["rooms"].items()
         ]
 
-    async def q7_async_clean_segments(self, segment_ids: list[str], **kwargs) -> None:
-        """Clean rooms by id via SET_ROOM_CLEAN."""
+    async def q7_async_clean_segments(
+        self, segment_ids: list[str], **kwargs
+    ) -> None:
+        """Clean rooms by id via the library's SET_ROOM_CLEAN wrapper."""
         try:
-            ids = [int(s) for s in segment_ids]
+            ids = [int(str(seg).strip()) for seg in segment_ids]
         except ValueError as err:
-            raise HomeAssistantError(
-                translation_domain="roborock",
-                translation_key="command_failed",
-                translation_placeholders={"command": "clean_segments"},
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="invalid_segment",
+                translation_placeholders={"segments": ", ".join(segment_ids)},
             ) from err
         try:
             await self.coordinator.api.clean_segments(ids)
         except RoborockException as err:
             raise HomeAssistantError(
-                translation_domain="roborock",
+                translation_domain=DOMAIN,
                 translation_key="command_failed",
                 translation_placeholders={"command": "clean_segments"},
             ) from err
 
-    async def q7_get_vacuum_current_position(self):
-        """Robot x/y from parsed map content."""
+    async def q7_get_vacuum_current_position(self) -> dict:
+        """Robot x/y (map pixel coordinates) from the parsed live map."""
         api = self.coordinator.api
         try:
             await api.map.refresh()
             await api.map_content.refresh()
         except RoborockException as err:
             raise HomeAssistantError(
-                translation_domain="roborock",
+                translation_domain=DOMAIN,
                 translation_key="map_failure",
             ) from err
         map_data = api.map_content.map_data
         pos = map_data.vacuum_position if map_data else None
         if pos is None:
             raise HomeAssistantError(
-                translation_domain="roborock",
+                translation_domain=DOMAIN,
                 translation_key="position_not_found",
             )
-        return {"x": int(pos.x), "y": int(pos.y)}
+        return {"x": round(pos.x), "y": round(pos.y)}
 
-    async def q7_goto(self, x: int, y: int) -> None:
-        """EXPERIMENTAL goto via service.set_point_clean.
+    RoborockQ7Vacuum.get_maps = q7_get_maps
+    RoborockQ7Vacuum.async_get_segments = q7_async_get_segments
+    RoborockQ7Vacuum.async_clean_segments = q7_async_clean_segments
+    RoborockQ7Vacuum.get_vacuum_current_position = q7_get_vacuum_current_position
+    applied += [
+        "Q7.get_maps",
+        "Q7.get_segments",
+        "Q7.clean_segments",
+        "Q7.position",
+    ]
 
-        python-roborock documents no Q7 goto wrapper, so this sends the most
-        plausible shape. The device validates and rejects bad params with an
-        error (safe) instead of moving. Test supervised. Raw fallback:
-        vacuum.send_command with command 'service.set_point_clean'.
-        """
-        _LOGGER.warning(
-            "roborock_b01: EXPERIMENTAL Q7 goto x=%s y=%s", x, y
+    # CLEAN_AREA is registered against the feature flag. Core defines
+    # supported_features as a (non-data) cached_property, so an entity
+    # created before this patch - or any already-cached instance value -
+    # would keep the old flags forever. A class-level property is a data
+    # descriptor: it wins over the cached_property AND any stale
+    # per-instance cache, so every Q7 entity (present or future)
+    # advertises room cleaning regardless of integration setup order.
+    if not getattr(RoborockQ7Vacuum, "_b01_clean_area", False):
+        base_features = getattr(
+            RoborockQ7Vacuum, "_attr_supported_features", VacuumEntityFeature(0)
         )
-        try:
-            from roborock.roborock_typing import RoborockB01Q7Methods
+        q7_features = base_features | VacuumEntityFeature.CLEAN_AREA
+        RoborockQ7Vacuum._attr_supported_features = q7_features
 
-            await self.coordinator.api.send(
-                RoborockB01Q7Methods.SET_POINT_CLEAN, {"x": x, "y": y}
-            )
-        except RoborockException as err:
-            _LOGGER.debug("roborock_b01: Q7 goto failed: %s", err)
-            raise HomeAssistantError(
-                translation_domain="roborock",
-                translation_key="command_failed",
-                translation_placeholders={"command": "set_point_clean"},
-            ) from err
+        def _supported_features(self):
+            """Patched by roborock_b01: adds CLEAN_AREA to the Q7.
 
-    async def q7_zoned_clean(
-        self, x1: int, y1: int, x2: int, y2: int, repeats: int
-    ) -> None:
-        """EXPERIMENTAL zoned clean via service.set_zone_clean.
+            Reads the (already OR'd) class attribute so per-instance
+            overrides keep working; being a data descriptor it also
+            defeats any stale cached_property value computed before this
+            patch loaded.
+            """
+            return self._attr_supported_features
 
-        Same caveat as goto: best-effort param shape
-        ({"zones": [[x1, y1, x2, y2, repeats]]}). Raw fallback:
-        vacuum.send_command with command 'service.set_zone_clean'.
-        """
-        params = {"zones": [[x1, y1, x2, y2, repeats]]}
-        _LOGGER.warning("roborock_b01: EXPERIMENTAL Q7 zone clean %s", params)
-        try:
-            from roborock.roborock_typing import RoborockB01Q7Methods
+        RoborockQ7Vacuum.supported_features = property(_supported_features)
+        RoborockQ7Vacuum._b01_clean_area = True
+    applied.append("Q7.CLEAN_AREA")
 
-            await self.coordinator.api.send(
-                RoborockB01Q7Methods.SET_ZONE_CLEAN, params
-            )
-        except RoborockException as err:
-            _LOGGER.debug("roborock_b01: Q7 zoned clean failed: %s", err)
-            raise HomeAssistantError(
-                translation_domain="roborock",
-                translation_key="command_failed",
-                translation_placeholders={"command": "set_zone_clean"},
-            ) from err
+    # ============================== Q10 ==============================
 
-    RoborockQ7Vacuum.get_maps = q7_get_maps  # type: ignore[method-assign]
-    applied.append("Q7.get_maps")
-    RoborockQ7Vacuum.async_get_segments = q7_async_get_segments  # type: ignore[method-assign]
-    applied.append("Q7.async_get_segments")
-    RoborockQ7Vacuum.async_clean_segments = q7_async_clean_segments  # type: ignore[method-assign]
-    applied.append("Q7.async_clean_segments")
-    RoborockQ7Vacuum.get_vacuum_current_position = q7_get_vacuum_current_position  # type: ignore[method-assign]
-    applied.append("Q7.get_vacuum_current_position")
-    RoborockQ7Vacuum.async_set_vacuum_goto_position = q7_goto  # type: ignore[method-assign]
-    applied.append("Q7.goto(EXPERIMENTAL)")
-    RoborockQ7Vacuum.async_set_vacuum_zoned_cleaning = q7_zoned_clean  # type: ignore[method-assign]
-    applied.append("Q7.zoned_clean(EXPERIMENTAL)")
-
-    try:
-        RoborockQ7Vacuum._attr_supported_features = (
-            RoborockQ7Vacuum._attr_supported_features
-            | VacuumEntityFeature.CLEAN_AREA
-        )
-        applied.append("Q7.CLEAN_AREA flag")
-    except Exception as err:  # pragma: no cover
-        _LOGGER.debug("roborock_b01: could not add Q7 CLEAN_AREA flag: %s", err)
-
-    # ---------------- Q10 (get_maps only; rest exists in core) ----------------
-
-    async def q10_get_maps(self):
-        """Current saved map + rooms from the Q10 map trait."""
+    async def q10_get_maps(self) -> dict:
+        """Current map + rooms from the push-driven Q10 map trait."""
         api = self.coordinator.api
         try:
+            await api.map.refresh()
             await api.maps.refresh()
         except RoborockException as err:
-            _LOGGER.debug("roborock_b01: Q10 maps.refresh failed: %s", err)
-        rooms: dict[int, str] = {}
-        for room in api.map.rooms or []:
-            try:
-                rooms[int(room.id)] = room.name or f"Room {room.id}"
-            except (TypeError, ValueError):
-                continue
-        flag = api.maps.current_map_id
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="map_failure",
+            ) from err
+        # Room names ride in with the next map push (map trait is
+        # push-driven; the refreshes above only kick the stream).
+        deadline = asyncio.get_running_loop().time() + _ROOMS_WAIT_TIMEOUT
+        while asyncio.get_running_loop().time() < deadline:
+            if api.map.rooms:
+                break
+            await asyncio.sleep(_ROOMS_POLL_INTERVAL)
+        rooms = {
+            room.id: room.name or f"Room {room.id}" for room in api.map.rooms
+        }
+        map_id = api.maps.current_map_id
         return {
             "maps": [
                 {
-                    "flag": flag,
-                    "name": f"Map {flag}" if flag is not None else "Map 0",
-                    "rooms": rooms,  # type: ignore[dict-item]
+                    "flag": map_id,
+                    "name": f"Map {map_id}" if map_id is not None else "Map",
+                    "rooms": rooms,
                 }
             ]
         }
 
-    RoborockQ10Vacuum.get_maps = q10_get_maps  # type: ignore[method-assign]
+    RoborockQ10Vacuum.get_maps = q10_get_maps
     applied.append("Q10.get_maps")
+
+    # Core already supports CLEAN_AREA on the Q10; asserted here so a
+    # future core change cannot silently drop it out from under our
+    # service's capability check.
+    RoborockQ10Vacuum._attr_supported_features = (
+        RoborockQ10Vacuum._attr_supported_features | VacuumEntityFeature.CLEAN_AREA
+    )
+    applied.append("Q10.CLEAN_AREA")
 
     return applied

@@ -1,48 +1,39 @@
 # Roborock B01 (Q7 / Q10) Full Support for Home Assistant
 
-Custom integration that completes Home Assistant core support for B01-protocol
-vacuums (`pv=B01`: Q7 BF/TF/M5/L5, Q10 series), built from
-[python-roborock `docs/DEVICES.md`](https://github.com/Python-roborock/python-roborock/blob/main/docs/DEVICES.md).
+Custom integration that completes Home Assistant core support for
+B01-protocol vacuums (`pv=B01`: Q7 BF/TF/M5/L5, Q10 series). Every
+command and data path used here is taken from the python-roborock
+library source and its own device-verified test suite - nothing is
+guessed.
 
 **No extra login.** It reuses the authenticated session of the official
-Roborock integration (same `DeviceManager` / coordinators). Set up the
-official integration first.
-
-## Why B01 needs this
-
-Per `DEVICES.md`, B01 differs from V1:
-
-| | V1 (S7/S8/…) | B01 (Q7/Q10) |
-|---|---|---|
-| Transport | MQTT + local TCP `:58867` | **MQTT only** |
-| Protocol | JSON RPC + AES | DPS protocol |
-| Channel | `V1Channel` + `RpcChannel` | `MqttChannel` + helpers |
-| Maps | `home` / `maps` traits | Q7: `map` + `map_content`; Q10: `maps` + `map` |
-| Live map | poll `map_content.refresh()` | Q7 **streams frames while cleaning** via `map_content.add_update_listener` |
-
-HA core implements the Q7/Q10 basics (start/pause/stop/dock/locate/fan,
-sensors) but leaves `get_maps` as `ServiceNotSupported` for both, gives Q7
-no segments/position/goto/zone, and creates no map camera. This package
-fills exactly those gaps using APIs the library already exposes.
+Roborock integration (its coordinators expose the library APIs). Set up
+the official integration first.
 
 ## What you get
 
-On `vacuum.roborock_q7_bf` (and all B01 Q7):
+On every B01 Q7 / Q10 vacuum (entities attach to the existing core
+device - no duplicates):
 
-- `roborock.get_maps` — current map id + room ids/names from
-  `GET_MAP_LIST` + `UPLOAD_BY_MAPID` (`MapData.rooms`)
-- Room segments (`CLEAN_AREA` flag, room list UI) + room cleaning via
-  `SET_ROOM_CLEAN`
-- `roborock.get_vacuum_current_position` from `map_data.vacuum_position`
-- `roborock.set_vacuum_goto_position` — EXPERIMENTAL via
-  `service.set_point_clean` (undocumented shape, device-validated)
-- `roborock.set_vacuum_zoned_cleaning` — EXPERIMENTAL via
-  `service.set_zone_clean`
-- New `camera.<device>_map` — live map PNG, push-driven while cleaning,
-  attached to the existing Roborock device (no polling loop)
-
-On Q10: `roborock.get_maps` (rooms from `api.map.rooms`, flag from
-`maps.current_map_id`). Position/goto/zone/segments already exist in core.
+- `camera.<name>_map` - **live map PNG, push-driven**. The device itself
+  streams map frames over MQTT while cleaning; the integration only
+  listens. No polling, no heartbeat, no extra MQTT connection.
+- **Room cleaning** - `vacuum.clean_segments` with numeric room ids.
+  On the Q7 this is implemented with the library's verified
+  `service.set_room_clean` wrapper (`clean_type=1, ctrl_value=1,
+  room_ids=[...]`).
+- `roborock.get_maps` - current map id + room ids/names.
+- `roborock.get_vacuum_current_position` - robot x/y from the parsed
+  live map.
+- `roborock.set_vacuum_goto_position` / `set_vacuum_zoned_cleaning`:
+  **Q10 only.** Already implemented by HA core on top of the library's
+  hardware-verified `vacuum.goto_position` / `vacuum.clean_zone`
+  wrappers - this package deliberately does not touch them. On the Q7
+  these services are **not available**: the library has no wrapper for
+  Q7 point/zone cleaning and no verified payload shape exists (checked
+  upstream and community sources).
+- `roborock_b01.clean_segment` service (works even where the core
+  segment-repair UI flow is unavailable).
 
 ## Install
 
@@ -51,39 +42,43 @@ Via UI (preferred):
 1. Copy `custom_components/roborock_b01/` to `/config/custom_components/`
    (or install via HACS custom repository).
 2. Restart HA.
-3. Settings → Devices & Services → **Add Integration** → **Roborock B01**
-   → Submit. No credentials — it reuses the official Roborock session.
-4. Restart HA. Log should show:
-   `roborock_b01: vacuum patches applied: [...]`
-5. Check for `camera.roborock_q7_bf_map`.
+3. Settings -> Devices & Services -> **Add Integration** ->
+   **Roborock B01** -> Submit. No credentials - it reuses the official
+   Roborock session.
+4. The log should show: `roborock_b01: patches applied: [...]`.
+5. Check for `camera.<your_vacuum>_map` and try room cleaning.
 
 YAML alternative: `roborock_b01:` in `configuration.yaml` + restart.
-Use one method, not both (the UI entry is canonical; YAML is skipped
-when an entry exists).
+Use one method, not both.
 
 ## Test order
 
-1. Developer Tools → Actions → `roborock.get_maps` on the Q7 vacuum.
-2. `roborock.get_vacuum_current_position`.
-3. Room list / room clean with one room.
-4. Open the map camera; run a clean and watch it update live.
-5. Goto/zone last, supervised — they log `EXPERIMENTAL` lines with params.
+1. Open the map camera, start a clean, watch it update live (pushes).
+2. Developer Tools -> Actions -> `roborock.get_maps` -> note room ids.
+3. `roborock_b01.clean_segment` (or `vacuum.clean_segments`) with one
+   room id.
+4. `roborock.get_vacuum_current_position`.
+5. On a Q10: goto/zone (core-provided). On a Q7: not available - see
+   limits below.
 
-## Limits (honest)
+## Honest limits
 
-- `get_maps` returns the **current** map only. `MapContentTrait` fetches
-  `current_map_id`; multi-floor enumeration needs a library extension.
-- Goto/zone param shapes are best-effort (no wrapper in python-roborock).
-  The device rejects bad shapes with an error instead of moving; paste the
-  log lines back to lock them in.
-- Expect MQTT latency (no local TCP exists for B01 — by design, see
-  `DEVICES.md`, not a bug in this package).
-- Empty `rooms: {}` means the map has no named rooms/outlines — name rooms
-  in the Roborock app and re-run.
+- **Q7 goto/zone is not implemented.** No library wrapper exists and no
+  verified wire payload could be found (upstream python-roborock main
+  still lacks one; no community MQTT capture documents the shapes). If
+  you capture the payload the Roborock app sends for point/zone cleaning
+  on a Q7, please open an issue - it can then be implemented with
+  confidence.
+- B01 is **MQTT-only by design** (no local TCP for this protocol) -
+  expect ~1-2 s cloud latency on commands. That is the protocol, not a
+  bug in this package.
+- `get_maps` returns the **current** map only.
+- Empty room lists mean the map has unnamed rooms - name them in the
+  Roborock app and re-run `roborock.get_maps`.
 
 ## Files
 
-- `manifest.json` — `dependencies: ["roborock"]`, no login, no config flow
-- `__init__.py` — applies vacuum patches, loads camera platform
-- `vacuum.py` — all B01 patches in one place (`patch_b01_vacuum_classes`)
-- `camera.py` — push-driven map cameras (the `DEVICES.md` listener pattern)
+- `manifest.json` - `dependencies: ["roborock"]`, no login
+- `__init__.py` - applies patches once, registers services, loads camera
+- `vacuum.py` - all Q7/Q10 control patches (`patch_b01_vacuum_classes`)
+- `camera.py` - push-driven map cameras (library listener pattern)

@@ -1,0 +1,8 @@
+[lint.isort]
+combine-as-imports = true
+
+# BLE001 (blind except) is deliberate in the map camera: trait/protocol
+# errors are already logged as RoborockException upstream, and a camera
+# must never crash on a bad frame.
+[lint.per-file-ignores]
+"custom_components/roborock_b01/camera.py" = ["BLE001"]

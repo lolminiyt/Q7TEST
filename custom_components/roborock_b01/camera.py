@@ -1,22 +1,26 @@
 """Live map cameras for B01 Q7/Q10 devices.
 
-Directly implements the DEVICES.md B01 pattern:
+Map sources (python-roborock, verified):
 
-- Q7 streams full map frames on its own while cleaning. We call
-  api.start() (subscribes to map pushes) and register
-  api.map_content.add_update_listener(cb), then read image_content
-  when notified. No polling, no heartbeat.
-- Q10 composes its map from map/trace/DPS streams; we listen on
-  api.map updates and request pushes via api.map.refresh().
+- Q7: the device streams full SCMap frames on its own while cleaning.
+  The subscription is started by the library when the device connects
+  (``RoborockDevice.connect`` -> ``b01_q7_properties.start()``). We only
+  register ``api.map_content.add_update_listener(cb)`` and read
+  ``image_content`` when notified. On demand, fetch one frame with
+  ``map.refresh()`` (GET_MAP_LIST) + ``map_content.refresh()``
+  (UPLOAD_BY_MAPID for the current map id).
+- Q10: the map is composed from pushed map/trace packets (stream
+  started by the library at connect). We listen on ``api.map``, read
+  ``image_content``, and kick the stream with the read-only
+  ``map.refresh()`` (REQUEST_DPS) when we need a first frame.
 
 Entities attach to the existing core Roborock device
-(identifiers {("roborock", duid)}), so no new device is created.
+(``identifiers={("roborock", duid)}``) - no extra device is created.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
 
 from homeassistant.components.camera import Camera
 from homeassistant.config_entries import ConfigEntry
@@ -27,9 +31,9 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
-_LOGGER = logging.getLogger(__name__)
+from .const import LATE_SCAN_DELAY
 
-_RESCAN_DELAY = timedelta(seconds=60)
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -38,7 +42,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Create map cameras for the UI config entry (proper unload support)."""
-    await _async_setup_b01_cameras(hass, async_add_entities, entry)
+    _async_setup_b01_cameras(hass, async_add_entities, entry)
 
 
 async def async_setup_platform(
@@ -48,54 +52,57 @@ async def async_setup_platform(
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
     """Create map cameras for YAML setup (legacy fallback)."""
-    await _async_setup_b01_cameras(hass, async_add_entities, None)
+    _async_setup_b01_cameras(hass, async_add_entities, None)
 
 
-async def _async_setup_b01_cameras(
+def _async_setup_b01_cameras(
     hass: HomeAssistant,
     async_add_entities: AddEntitiesCallback,
     entry: ConfigEntry | None,
 ) -> None:
-    """Create map cameras for every B01 coordinator, present and future."""
+    """Create a map camera for every B01 coordinator, present and future."""
     known: set[str] = set()
 
-    def _add(coord, is_q7: bool) -> None:
+    def _add(coord) -> None:
         if coord.duid in known:
             return
         known.add(coord.duid)
-        async_add_entities([B01MapCamera(coord, is_q7)])
+        async_add_entities([B01MapCamera(coord)])
 
     @callback
     def _late(coord) -> None:
-        from homeassistant.components.roborock.coordinator import (
-            RoborockB01Q7UpdateCoordinator,
-        )
+        """Handle a coordinator added after our setup ran."""
+        _add(coord)
 
-        _add(coord, isinstance(coord, RoborockB01Q7UpdateCoordinator))
-
+    @callback
     def _scan(_now=None) -> None:
+        """Add cameras for all known B01 coordinators."""
+
         for rob_entry in hass.config_entries.async_entries("roborock"):
             coordinators = getattr(rob_entry, "runtime_data", None)
             if coordinators is None:
                 continue
             for coord in coordinators.b01_q7:
-                _add(coord, True)
+                _add(coord)
             for coord in coordinators.b01_q10:
-                _add(coord, False)
-            unsub = async_dispatcher_connect(
-                hass,
-                f"roborock_coordinator_added_{rob_entry.entry_id}",
-                _late,
-            )
+                _add(coord)
             # Tie listener lifetime to our own entry when set up via UI.
+            # (YAML mode is a legacy path; its listeners live until HA stops.)
             if entry is not None:
-                entry.async_on_unload(unsub)
+                entry.async_on_unload(
+                    async_dispatcher_connect(
+                        hass,
+                        f"roborock_coordinator_added_{rob_entry.entry_id}",
+                        _late,
+                    )
+                )
 
     _scan()
     # Re-scan once in case the core entry finished after us.
-    remove_rescan = async_call_later(hass, _RESCAN_DELAY, _scan)
+    remove_rescan = async_call_later(hass, LATE_SCAN_DELAY, _scan)
     if entry is not None:
         entry.async_on_unload(remove_rescan)
+
 
 
 class B01MapCamera(Camera):
@@ -104,12 +111,14 @@ class B01MapCamera(Camera):
     _attr_content_type = "image/png"
     _attr_has_entity_name = True
     _attr_name = "Map"
+    _attr_should_poll = False
 
-    def __init__(self, coordinator, is_q7: bool) -> None:
-        """Initialize."""
+    def __init__(self, coordinator) -> None:
+        """Initialize from the core coordinator (Q7 or Q10)."""
         super().__init__()
         self.coordinator = coordinator
-        self._is_q7 = is_q7
+        self._api = coordinator.api
+        self._is_q7 = hasattr(self._api, "map_content")
         self._attr_unique_id = f"{coordinator.duid}_b01_map"
         self._attr_device_info = DeviceInfo(
             identifiers={("roborock", coordinator.duid)}
@@ -117,32 +126,33 @@ class B01MapCamera(Camera):
         self._image: bytes | None = None
         self._unsub_push = None
 
+    def _map_trait(self):
+        """The trait that carries the rendered PNG."""
+        return self._api.map_content if self._is_q7 else self._api.map
+
     async def async_added_to_hass(self) -> None:
-        """Subscribe to live map pushes and cache the first frame."""
+        """Subscribe to live map pushes and fetch an initial frame."""
         await super().async_added_to_hass()
-        api = self.coordinator.api
-        # Q7: subscribe to unsolicited SCMap frames (DEVICES.md pattern).
-        # Guarded: DeviceManager may already have started it.
-        start = getattr(api, "start", None)
-        if callable(start):
-            try:
-                await start()
-            except Exception as err:  # pragma: no cover
-                _LOGGER.debug("roborock_b01: map push subscribe failed: %s", err)
-        await self._refresh_image()
+        # The library already subscribed the device's push stream when it
+        # connected (device.connect() starts B01 traits); DO NOT call
+        # api.start() again - for Q10 that would spawn a second subscribe
+        # task. Just listen for trait updates.
         try:
-            trait = api.map_content if self._is_q7 else api.map
-            self._unsub_push = trait.add_update_listener(self._on_push)
-        except Exception as err:  # pragma: no cover
+            self._unsub_push = self._map_trait().add_update_listener(
+                self._on_push
+            )
+        except Exception as err:  # pragma: no cover - defensive
             _LOGGER.debug("roborock_b01: push listener failed: %s", err)
+        if self._image is None:
+            await self._refresh_image()
 
     async def async_will_remove_from_hass(self) -> None:
         """Unsubscribe from pushes."""
         if self._unsub_push is not None:
             try:
                 self._unsub_push()
-            except Exception:  # pragma: no cover
-                pass
+            except Exception as err:
+                _LOGGER.debug("roborock_b01: push unsubscribe failed: %s", err)
             self._unsub_push = None
         await super().async_will_remove_from_hass()
 
@@ -150,30 +160,28 @@ class B01MapCamera(Camera):
     def _on_push(self) -> None:
         """Cache the pushed frame and update state."""
         try:
-            api = self.coordinator.api
-            trait = api.map_content if self._is_q7 else api.map
-            self._image = trait.image_content
-        except Exception:  # pragma: no cover
-            pass
+            self._image = self._map_trait().image_content
+        except Exception:  # pragma: no cover - defensive
+            return
         self.async_write_ha_state()
 
     async def _refresh_image(self) -> None:
-        """Fetch one frame on demand (best effort, MQTT-only per B01)."""
+        """Fetch one frame on demand (MQTT-only per the B01 protocol)."""
         from roborock.exceptions import RoborockException
 
-        api = self.coordinator.api
         try:
             if self._is_q7:
-                await api.map.refresh()
-                await api.map_content.refresh()
-                self._image = api.map_content.image_content
+                # GET_MAP_LIST (current map id) then UPLOAD_BY_MAPID.
+                await self._api.map.refresh()
+                await self._api.map_content.refresh()
             else:
-                await api.maps.refresh()
-                await api.map.refresh()
-                self._image = api.map.image_content
+                # Read-only REQUEST_DPS kick; frames arrive via pushes.
+                await self._api.map.refresh()
+                await self._api.maps.refresh()
+            self._image = self._map_trait().image_content
         except RoborockException as err:
             _LOGGER.debug("roborock_b01: map refresh failed: %s", err)
-        except Exception as err:  # pragma: no cover
+        except Exception as err:  # pragma: no cover - defensive
             _LOGGER.debug("roborock_b01: unexpected map error: %s", err)
 
     async def async_camera_image(
