@@ -62,6 +62,7 @@ def _async_setup_b01_cameras(
 ) -> None:
     """Create a map camera for every B01 coordinator, present and future."""
     known: set[str] = set()
+    watched_entries: set[str] = set()
 
     def _add(coord) -> None:
         if coord.duid in known:
@@ -77,32 +78,38 @@ def _async_setup_b01_cameras(
     @callback
     def _scan(_now=None) -> None:
         """Add cameras for all known B01 coordinators."""
-
         for rob_entry in hass.config_entries.async_entries("roborock"):
+            # One dispatcher subscription per core entry: _scan runs
+            # twice (immediate + delayed rescan), so without this guard
+            # each entry would end up with two live _late listeners.
+            if rob_entry.entry_id in watched_entries:
+                continue
+            watched_entries.add(rob_entry.entry_id)
+            remove_listener = async_dispatcher_connect(
+                hass,
+                f"roborock_coordinator_added_{rob_entry.entry_id}",
+                _late,
+            )
+            if entry is not None:
+                # UI mode: listener dies with our config entry.
+                entry.async_on_unload(remove_listener)
+            # YAML (legacy) mode: keep it until HA stops - same
+            # tradeoff the coordinators watcher makes.
             coordinators = getattr(rob_entry, "runtime_data", None)
             if coordinators is None:
                 continue
-            for coord in coordinators.b01_q7:
+            # Old HA cores have no B01 coordinator lists; the vacuum-patch
+            # guard already logged that room/map features are disabled.
+            for coord in list(getattr(coordinators, "b01_q7", ()) or ()):
                 _add(coord)
-            for coord in coordinators.b01_q10:
+            for coord in list(getattr(coordinators, "b01_q10", ()) or ()):
                 _add(coord)
-            # Tie listener lifetime to our own entry when set up via UI.
-            # (YAML mode is a legacy path; its listeners live until HA stops.)
-            if entry is not None:
-                entry.async_on_unload(
-                    async_dispatcher_connect(
-                        hass,
-                        f"roborock_coordinator_added_{rob_entry.entry_id}",
-                        _late,
-                    )
-                )
 
     _scan()
     # Re-scan once in case the core entry finished after us.
     remove_rescan = async_call_later(hass, LATE_SCAN_DELAY, _scan)
     if entry is not None:
         entry.async_on_unload(remove_rescan)
-
 
 
 class B01MapCamera(Camera):
@@ -138,9 +145,7 @@ class B01MapCamera(Camera):
         # api.start() again - for Q10 that would spawn a second subscribe
         # task. Just listen for trait updates.
         try:
-            self._unsub_push = self._map_trait().add_update_listener(
-                self._on_push
-            )
+            self._unsub_push = self._map_trait().add_update_listener(self._on_push)
         except Exception as err:  # pragma: no cover - defensive
             _LOGGER.debug("roborock_b01: push listener failed: %s", err)
         if self._image is None:

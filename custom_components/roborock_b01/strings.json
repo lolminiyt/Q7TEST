@@ -65,6 +65,10 @@
     "device_failures": {
       "title": "Roborock device unreachable ({failures} failed commands)",
       "description": "Several commands in a row failed even after automatic\nretries. The robot may be offline, asleep, or out of cloud reach.\nThis clears itself automatically on the next successful command."
+    },
+    "stale_area_mapping": {
+      "title": "Room mapping needs redoing: {entity_id}",
+      "description": "None of the rooms saved in the segment-to-area\nmapping exist on the robot's current map (e.g. after a map\nrecovery), and no new mapping could be built automatically - so\nvacuum.clean_area will report that no mapping is configured.\nRooms the robot currently reports: {valid}.\nRe-map areas in the vacuum entity's segment mapping editor, or\nuse roborock_b01.clean_segment with room ids from\nroborock.get_maps. The issue clears itself once a verified\nmapping exists."
     }
   },
   "exceptions": {

@@ -99,14 +99,38 @@ def _q7_room_names(api) -> dict[int, str]:
 
 
 def patch_b01_vacuum_classes() -> list[str]:
-    """Patch core B01 vacuum classes. Returns the applied patch names."""
-    from homeassistant.components.roborock.vacuum import (
-        RoborockQ7Vacuum,
-        RoborockQ10Vacuum,
-    )
-    from homeassistant.components.vacuum import Segment, VacuumEntityFeature
-    from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
-    from roborock.exceptions import RoborockException
+    """Patch core B01 vacuum classes. Returns the applied patch names.
+
+    Returns an empty list (and logs one clear error) when the running
+    HA core predates the B01 vacuum classes (2026.9); setup then fails
+    fast with that reason.
+    """
+    try:
+        from homeassistant.components.roborock.vacuum import (
+            RoborockQ7Vacuum,
+            RoborockQ10Vacuum,
+        )
+        from homeassistant.components.vacuum import Segment, VacuumEntityFeature
+        from homeassistant.exceptions import (
+            HomeAssistantError,
+            ServiceValidationError,
+        )
+        from roborock.data.b01_q7.b01_q7_code_mappings import (
+            CleanTaskTypeMapping,
+            SCDeviceCleanParam,
+            SCWindMapping,
+        )
+        from roborock.exceptions import RoborockException
+    except ImportError as err:
+        _LOGGER.error(
+            "roborock_b01: this Home Assistant does not provide the B01 "
+            "vacuum classes (RoborockQ7Vacuum/RoborockQ10Vacuum landed in "
+            "HA 2026.9) or the pinned python-roborock 7.8.1: %s. The "
+            "integration entry will show as failed - upgrade Home "
+            "Assistant to 2026.9+ and reload.",
+            err,
+        )
+        return []
 
     applied: list[str] = []
 
@@ -149,9 +173,7 @@ def patch_b01_vacuum_classes() -> list[str]:
             for room_id, name in first["rooms"].items()
         ]
 
-    async def q7_async_clean_segments(
-        self, segment_ids: list[str], **kwargs
-    ) -> None:
+    async def q7_async_clean_segments(self, segment_ids: list[str], **kwargs) -> None:
         """Clean rooms by id via the library's SET_ROOM_CLEAN wrapper.
 
         Failsafe: empty or malformed ids are refused before anything
@@ -197,6 +219,17 @@ def patch_b01_vacuum_classes() -> list[str]:
                     or "none (no map data on the robot)",
                 },
             )
+        # Debug-log the exact wire payload before it goes out: this is
+        # the string to compare against a Roborock-app MQTT capture when
+        # a room clean misbehaves on-device (see TESTING.md).
+        _LOGGER.debug(
+            "roborock_b01: %s clean_segments -> service.set_room_clean "
+            "{clean_type: %d, ctrl_value: %d, room_ids: %s}",
+            getattr(self, "entity_id", self.__class__.__name__),
+            CleanTaskTypeMapping.ROOM.code,
+            SCDeviceCleanParam.START.code,
+            ids,
+        )
         try:
             await async_with_retry(
                 "clean_segments", self.coordinator.api.clean_segments, ids
@@ -237,8 +270,6 @@ def patch_b01_vacuum_classes() -> list[str]:
         the only gap was the stale UI (fan_speed reads
         coordinator.data.wind_name, updated by the one-minute poll).
         """
-        from roborock.data.b01_q7.b01_q7_code_mappings import SCWindMapping
-
         try:
             fan_speed_code = SCWindMapping.from_value(fan_speed)
         except ValueError as err:
@@ -320,9 +351,7 @@ def patch_b01_vacuum_classes() -> list[str]:
             if api.map.rooms:
                 break
             await asyncio.sleep(_ROOMS_POLL_INTERVAL)
-        rooms = {
-            room.id: room.name or f"Room {room.id}" for room in api.map.rooms
-        }
+        rooms = {room.id: room.name or f"Room {room.id}" for room in api.map.rooms}
         map_id = api.maps.current_map_id
         return {
             "maps": [

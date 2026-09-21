@@ -58,10 +58,14 @@ device - no duplicates):
   the unverified Q7 point/zone payloads). Blocking happens at the
   device channel, so no integration, script or dashboard can wipe your
   map through Home Assistant. The Roborock app is not affected.
-- **Mapping keeper is read-mostly** - it only ever writes the mapping
-  when the registry entry has none (restore/auto-map) or filters out
-  robot-reported room ids you never mapped; a healthy mapping is only
-  copied to backup, never rewritten.
+- **Mapping keeper is read-mostly and self-healing** - a healthy
+  mapping is only copied to backup, never rewritten. The only writes
+  are: restoring a missing mapping (always filtered against the
+  robot's *current* rooms - if they cannot be read, nothing is
+  restored: fail-closed), auto-mapping by name, and trimming away
+  room ids the robot no longer reports after a map recovery. A fully
+  stale mapping is rebuilt or dropped, with a `stale_area_mapping`
+  repair issue explaining what to do.
 
 ## "Area mapping is not configured"
 
@@ -74,11 +78,15 @@ The integration also **protects that mapping**:
 
 - It is backed up to `.storage/roborock_b01_area_mapping` whenever it
   exists, and **restored automatically** if the entity registry entry
-  is ever rebuilt (re-added Roborock integration, registry restore).
+  is ever rebuilt (re-added Roborock integration, registry restore) -
+  but only against the robot's current room list, never blind.
 - If no mapping exists anywhere, rooms are **auto-mapped to HA areas
   by name**: a robot room called "Kitchen" maps to the "Kitchen"
   area (exact or containing match, case-insensitive, longest match
   wins; unmatched rooms are left out rather than guessed).
+- After a **map recovery** (room ids usually change), the keeper trims
+  the stale ids, rebuilds the mapping, or - if nothing can be rebuilt -
+  removes it and raises the *Room mapping needs redoing* repair issue.
 - Watch the log for `roborock_b01: restoring segment-to-area mapping`
   or `roborock_b01: auto-mapped robot rooms` after startup.
 
@@ -88,14 +96,19 @@ room buttons that use it. Room ids are verified against the robot's
 current map before sending - unknown or stale ids are refused with the
 valid-room list instead of triggering the device's full-house fallback
 (the Q7 firmware silently cleans everything when SET_ROOM_CLEAN carries
-room ids it does not know).
+room ids it does not know). `vacuum.clean_area` resolves its areas into
+the same guarded path, so it can never send an unknown id either.
 
 ## Install
 
 Via UI (preferred):
 
 1. Copy `custom_components/roborock_b01/` to `/config/custom_components/`
-   (or install via HACS custom repository).
+   (or install via HACS custom repository). Requires **HA 2026.9+** —
+   older cores fail setup with a clear log (no B01 vacuum classes).
+   Note: this pins `python-roborock==7.8.1`, newer than the official
+   roborock integration's 7.1.1 (HA 2026.9); verify the official
+   integration's entities after installing.
 2. Restart HA.
 3. Settings -> Devices & Services -> **Add Integration** ->
    **Roborock B01** -> Submit. No credentials - it reuses the official

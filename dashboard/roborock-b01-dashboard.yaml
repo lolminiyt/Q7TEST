@@ -1,0 +1,350 @@
+# Roborock B01 dashboard - full robot control from one view.
+#
+# How to use: Settings -> Dashboards -> Add dashboard -> (new, empty) ->
+#   ... menu -> Edit dashboard -> ... menu -> Raw configuration editor ->
+#   paste this whole file -> Save.
+#
+# Before pasting, replace:
+#   - vacuum.roborock_q7_bf     -> your vacuum entity id
+#   - camera.roborock_q7_bf_map -> your map camera entity id
+#   - the segment ids 16 / 17   -> your room ids (run Developer Tools ->
+#     Actions -> roborock.get_maps on your vacuum; the response lists
+#     every room id + name). Wrong ids are refused before anything is
+#     sent - the error lists your real rooms, so you can copy them in.
+#
+# Room buttons use roborock_b01.clean_segment, which needs NO area
+# mapping. The settings buttons use roborock_b01.clean_settings
+# (suction, water, vac/mop, cycles, route). Both are Q7-only services
+# from this integration.
+#
+# If you prefer HA areas (and the built-in clean_area action), run the
+# segment-to-area mapping editor once from the vacuum entity - the
+# mapping is stored in the entity registry, so it survives restarts.
+# Then you can also call vacuum.clean_area with cleaning_area_id.
+#
+# Note: tapping the map to send the robot somewhere (goto/zone) is a
+# Q10-only capability; this Q7 has no verified goto/zone payload, so
+# there is intentionally no map-tap control here.
+
+title: Roborock
+views:
+  - title: Robot
+    path: robot
+    cards:
+      # ---------------- live map (push-driven camera) ----------------
+      - type: picture-entity
+        entity: camera.roborock_q7_bf_map
+        name: Live map
+        show_state: false
+        show_name: true
+        camera_view: auto
+
+      # ---------------- protection status ----------------
+      # binary_sensor.<name>_protection: "on" = a command was blocked or
+      # the device is unreachable. Attributes show what happened.
+      - type: entities
+        title: Protection
+        entities:
+          - entity: binary_sensor.roborock_b01_protection
+            name: Protection
+          - type: attribute
+            entity: binary_sensor.roborock_b01_protection
+            attribute: last_blocked_command
+            name: Last blocked command
+          - type: attribute
+            entity: binary_sensor.roborock_b01_protection
+            attribute: blocked_commands_total
+            name: Blocked commands total
+          - type: attribute
+            entity: binary_sensor.roborock_b01_protection
+            attribute: last_device_failure
+            name: Last device failure
+          - type: attribute
+            entity: binary_sensor.roborock_b01_protection
+            attribute: failed_commands_total
+            name: Failed commands total
+          - type: attribute
+            entity: binary_sensor.roborock_b01_protection
+            attribute: last_device_success
+            name: Last successful command
+
+      # ---------------- robot transport controls ----------------
+      - type: horizontal-stack
+        cards:
+          - type: button
+            name: Start
+            icon: mdi:play
+            tap_action:
+              action: perform-action
+              perform_action: vacuum.start
+              target:
+                entity_id: vacuum.roborock_q7_bf
+          - type: button
+            name: Pause
+            icon: mdi:pause
+            tap_action:
+              action: perform-action
+              perform_action: vacuum.pause
+              target:
+                entity_id: vacuum.roborock_q7_bf
+          - type: button
+            name: Stop
+            icon: mdi:stop
+            tap_action:
+              action: perform-action
+              perform_action: vacuum.stop
+              target:
+                entity_id: vacuum.roborock_q7_bf
+          - type: button
+            name: Dock
+            icon: mdi:home-import-outline
+            tap_action:
+              action: perform-action
+              perform_action: vacuum.return_to_base
+              target:
+                entity_id: vacuum.roborock_q7_bf
+          - type: button
+            name: Find me
+            icon: mdi:map-marker-radius
+            tap_action:
+              action: perform-action
+              perform_action: vacuum.locate
+              target:
+                entity_id: vacuum.roborock_q7_bf
+
+      # ---------------- suction power ----------------
+      # quiet / balanced / turbo / max / max_plus
+      - type: horizontal-stack
+        cards:
+          - type: button
+            name: Quiet
+            icon: mdi:fan-speed-1
+            tap_action:
+              action: perform-action
+              perform_action: roborock_b01.clean_settings
+              target:
+                entity_id: vacuum.roborock_q7_bf
+              data:
+                fan_speed: quiet
+          - type: button
+            name: Balanced
+            icon: mdi:fan-speed-2
+            tap_action:
+              action: perform-action
+              perform_action: roborock_b01.clean_settings
+              target:
+                entity_id: vacuum.roborock_q7_bf
+              data:
+                fan_speed: balanced
+          - type: button
+            name: Turbo
+            icon: mdi:fan-speed-3
+            tap_action:
+              action: perform-action
+              perform_action: roborock_b01.clean_settings
+              target:
+                entity_id: vacuum.roborock_q7_bf
+              data:
+                fan_speed: turbo
+          - type: button
+            name: Max
+            icon: mdi:fan-speed-4
+            tap_action:
+              action: perform-action
+              perform_action: roborock_b01.clean_settings
+              target:
+                entity_id: vacuum.roborock_q7_bf
+              data:
+                fan_speed: max
+          - type: button
+            name: Max+
+            icon: mdi:fan-chevron-up
+            tap_action:
+              action: perform-action
+              perform_action: roborock_b01.clean_settings
+              target:
+                entity_id: vacuum.roborock_q7_bf
+              data:
+                fan_speed: max_plus
+
+      # ---------------- water flow ----------------
+      # low / medium / high
+      - type: horizontal-stack
+        cards:
+          - type: button
+            name: Water low
+            icon: mdi:water-minus
+            tap_action:
+              action: perform-action
+              perform_action: roborock_b01.clean_settings
+              target:
+                entity_id: vacuum.roborock_q7_bf
+              data:
+                water_level: low
+          - type: button
+            name: Water med
+            icon: mdi:water
+            tap_action:
+              action: perform-action
+              perform_action: roborock_b01.clean_settings
+              target:
+                entity_id: vacuum.roborock_q7_bf
+              data:
+                water_level: medium
+          - type: button
+            name: Water high
+            icon: mdi:water-plus
+            tap_action:
+              action: perform-action
+              perform_action: roborock_b01.clean_settings
+              target:
+                entity_id: vacuum.roborock_q7_bf
+              data:
+                water_level: high
+
+      # ---------------- clean mode ----------------
+      # vacuum (only vacuum) / vac_and_mop / mop (only mop)
+      - type: horizontal-stack
+        cards:
+          - type: button
+            name: Vacuum only
+            icon: mdi:vacuum
+            tap_action:
+              action: perform-action
+              perform_action: roborock_b01.clean_settings
+              target:
+                entity_id: vacuum.roborock_q7_bf
+              data:
+                clean_mode: vacuum
+          - type: button
+            name: Vacuum + Mop
+            icon: mdi:broom
+            tap_action:
+              action: perform-action
+              perform_action: roborock_b01.clean_settings
+              target:
+                entity_id: vacuum.roborock_q7_bf
+              data:
+                clean_mode: vac_and_mop
+          - type: button
+            name: Mop only
+            icon: mdi:water-opacity
+            tap_action:
+              action: perform-action
+              perform_action: roborock_b01.clean_settings
+              target:
+                entity_id: vacuum.roborock_q7_bf
+              data:
+                clean_mode: mop
+
+      # ---------------- cycles + route ----------------
+      - type: horizontal-stack
+        cards:
+          - type: button
+            name: 1 cycle
+            icon: mdi:numeric-1-box-outline
+            tap_action:
+              action: perform-action
+              perform_action: roborock_b01.clean_settings
+              target:
+                entity_id: vacuum.roborock_q7_bf
+              data:
+                repeat: one
+          - type: button
+            name: 2 cycles
+            icon: mdi:numeric-2-box-outline
+            tap_action:
+              action: perform-action
+              perform_action: roborock_b01.clean_settings
+              target:
+                entity_id: vacuum.roborock_q7_bf
+              data:
+                repeat: two
+          - type: button
+            name: Route standard
+            icon: mdi:route
+            tap_action:
+              action: perform-action
+              perform_action: roborock_b01.clean_settings
+              target:
+                entity_id: vacuum.roborock_q7_bf
+              data:
+                clean_route: balanced
+          - type: button
+            name: Route deep
+            icon: mdi:route-variant
+            tap_action:
+              action: perform-action
+              perform_action: roborock_b01.clean_settings
+              target:
+                entity_id: vacuum.roborock_q7_bf
+              data:
+                clean_route: deep
+
+      # ---------------- room cleaning ----------------
+      # Copy a button per room and set its segment_id from get_maps.
+      - type: vertical-stack
+        cards:
+          - type: markdown
+            content: >-
+              **Rooms** - replace the ids with yours from
+              `roborock.get_maps`, one button per room.
+          - type: horizontal-stack
+            cards:
+              - type: button
+                name: Room 16
+                icon: mdi:broom
+                tap_action:
+                  action: perform-action
+                  perform_action: roborock_b01.clean_segment
+                  target:
+                    entity_id: vacuum.roborock_q7_bf
+                  data:
+                    segment_id:
+                      - 16
+              - type: button
+                name: Room 17
+                icon: mdi:bed
+                tap_action:
+                  action: perform-action
+                  perform_action: roborock_b01.clean_segment
+                  target:
+                    entity_id: vacuum.roborock_q7_bf
+                  data:
+                    segment_id:
+                      - 17
+
+      # ---------------- maintenance ----------------
+      # After you finish the one-time segment-to-area mapping (see the
+      # README section below), you can also clean by HA area. Uncomment
+      # and set your area ids (Settings -> Areas & zones):
+      # - type: horizontal-stack
+      #   cards:
+      #     - type: button
+      #       name: Clean kitchen area
+      #       icon: mdi:silverware-clean
+      #       tap_action:
+      #         action: perform-action
+      #         perform_action: vacuum.clean_area
+      #         target:
+      #           entity_id: vacuum.roborock_q7_bf
+      #         data:
+      #           cleaning_area_id:
+      #             - kitchen
+      - type: entities
+        title: Status
+        entities:
+          - entity: vacuum.roborock_q7_bf
+            name: Vacuum
+          - type: attribute
+            entity: vacuum.roborock_q7_bf
+            attribute: battery_level
+            name: Battery
+          - type: attribute
+            entity: vacuum.roborock_q7_bf
+            attribute: fan_speed
+            name: Fan speed
+          - type: attribute
+            entity: vacuum.roborock_q7_bf
+            attribute: status
+            name: Status

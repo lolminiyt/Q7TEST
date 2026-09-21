@@ -62,7 +62,12 @@ def async_watch_b01_coordinators(
             coordinators = getattr(rob_entry, "runtime_data", None)
             if coordinators is None:
                 continue
-            for coord in list(coordinators.b01_q7) + list(coordinators.b01_q10):
+            # Old HA cores have no B01 coordinator lists; the vacuum-patch
+            # guard already logged that room/map features are disabled.
+            coords = list(getattr(coordinators, "b01_q7", ()) or ()) + list(
+                getattr(coordinators, "b01_q10", ()) or ()
+            )
+            for coord in coords:
                 _deliver(coord)
 
     _scan()

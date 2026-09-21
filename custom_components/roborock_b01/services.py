@@ -99,8 +99,7 @@ def async_register_services(hass: HomeAssistant) -> None:
         }
         if not requested:
             raise ServiceValidationError(
-                "Provide at least one of: "
-                + ", ".join(sorted(_CLEAN_SETTINGS_FIELDS))
+                "Provide at least one of: " + ", ".join(sorted(_CLEAN_SETTINGS_FIELDS))
             )
 
         def _invalid(field: str, value: object, mapping) -> ServiceValidationError:

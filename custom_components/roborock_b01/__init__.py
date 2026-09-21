@@ -46,7 +46,14 @@ def _async_apply_once(hass: HomeAssistant) -> bool:
         from .issues import async_setup_issue_reporter
         from .vacuum import patch_b01_vacuum_classes
 
-        _LOGGER.info("roborock_b01: patches applied: %s", patch_b01_vacuum_classes())
+        applied = patch_b01_vacuum_classes()
+        if applied:
+            _LOGGER.info("roborock_b01: patches applied: %s", applied)
+        else:
+            # Old HA core: refuse setup (the guard logged the reason);
+            # not marking patched means a retry/restart after upgrading
+            # HA re-applies the patches.
+            return False
         data["_b01_unsub_issues"] = async_setup_issue_reporter(hass)
         data["_b01_patched"] = True
         return True
@@ -62,7 +69,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     from .area_mapping import async_setup_area_mapping_keeper
     from .services import async_register_services
 
-    _async_apply_once(hass)
+    if not _async_apply_once(hass):
+        # Old HA core (guard logged the reason): fail the YAML setup
+        # instead of running a half-featured integration.
+        return False
     async_register_services(hass)
     async_setup_area_mapping_keeper(hass, None)
     await async_load_platform(hass, "camera", DOMAIN, {}, config)
@@ -74,7 +84,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     from .area_mapping import async_setup_area_mapping_keeper
     from .services import async_register_services
 
-    _async_apply_once(hass)
+    if not _async_apply_once(hass):
+        # Old HA core (guard logged the reason): mark the entry failed
+        # so the UI shows it, instead of a silently half-featured setup.
+        return False
     async_register_services(hass)
     # Reconcile the segment-to-area mapping (backup / restore / auto-map)
     # whenever a B01 coordinator shows up, now or in the future.

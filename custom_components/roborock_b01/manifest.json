@@ -5,8 +5,12 @@
   "config_flow": true,
   "integration_type": "service",
   "documentation": "https://github.com/Python-roborock/python-roborock/blob/main/docs/DEVICES.md",
-  "dependencies": ["roborock"],
+  "dependencies": [
+    "roborock"
+  ],
   "codeowners": [],
   "iot_class": "cloud_push",
-  "requirements": []
+  "requirements": [
+    "python-roborock==7.8.1"
+  ]
 }

@@ -63,8 +63,7 @@ class B01ProtectionBinarySensor(BinarySensorEntity):
     def is_on(self) -> bool:
         attrs = self._status.attributes()
         return bool(
-            attrs["last_blocked_command"] is not None
-            or attrs["device_unreachable"]
+            attrs["last_blocked_command"] is not None or attrs["device_unreachable"]
         )
 
     @property
