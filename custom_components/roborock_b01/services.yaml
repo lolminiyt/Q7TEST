@@ -1,0 +1,102 @@
+clean_segment:
+  target:
+    entity:
+      integration: roborock_b01
+      domain: vacuum
+  fields:
+    segment_id:
+      required: true
+      selector:
+        object:
+clean_settings:
+  target:
+    entity:
+      integration: roborock_b01
+      domain: vacuum
+  fields:
+    fan_speed:
+      selector:
+        select:
+          options: [quiet, balanced, turbo, max, max_plus]
+    water_level:
+      selector:
+        select:
+          options: [low, medium, high]
+    clean_mode:
+      selector:
+        select:
+          options: [vacuum, vac_and_mop, mop]
+    repeat:
+      selector:
+        select:
+          options: [one, two]
+    clean_route:
+      selector:
+        select:
+          options: [balanced, deep]
+get_maps:
+  target:
+    entity:
+      integration: roborock_b01
+      domain: vacuum
+get_vacuum_current_position:
+  target:
+    entity:
+      integration: roborock_b01
+      domain: vacuum
+set_vacuum_goto_position:
+  target:
+    entity:
+      integration: roborock_b01
+      domain: vacuum
+  fields:
+    x:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 100000
+    y:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 100000
+set_vacuum_zoned_cleaning:
+  target:
+    entity:
+      integration: roborock_b01
+      domain: vacuum
+  fields:
+    x1:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 100000
+    y1:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 100000
+    x2:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 100000
+    y2:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 100000
+    repeats:
+      required: true
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 2
+          step: 1

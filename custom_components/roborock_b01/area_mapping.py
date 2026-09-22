@@ -40,14 +40,13 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.storage import Store
 
 from .const import DOMAIN
-from .coordinators import async_watch_b01_coordinators
 
 _LOGGER = logging.getLogger(__name__)
 
 STORAGE_KEY = "roborock_b01_area_mapping"
 STORAGE_VERSION = 1
-# Time for the core entry to finish building the vacuum entity (and its
-# registry entry) after its coordinator appears.
+# Time for our entities to register (and their registry entries to
+# settle) after the hub creates the coordinators.
 _RECONCILE_DELAY = 10  # seconds
 
 
@@ -129,7 +128,7 @@ class _Keeper:
         er = _async_entity_registry(self.hass)
         for entry in er.entities.values():
             if (
-                getattr(entry, "platform", None) == "roborock"
+                getattr(entry, "platform", None) == DOMAIN
                 and getattr(entry, "device_id", None) == device.id
                 and str(getattr(entry, "entity_id", "")).startswith("vacuum.")
             ):
@@ -435,24 +434,23 @@ class _Keeper:
 
 @callback
 def async_setup_area_mapping_keeper(hass: HomeAssistant, entry) -> None:
-    """Reconcile the mapping whenever a B01 coordinator appears.
+    """Reconcile the mapping for every coordinator in the hub registry.
 
-    ``entry`` (our config entry) owns all listener lifetimes when given;
-    in YAML mode they live until HA stops (same tradeoff as the cameras).
+    Runs once now and once after entities/registries have settled (the
+    second pass catches entity registration lag).
     """
     from homeassistant.helpers.event import async_call_later
 
+    from .hub import get_coordinators
+
     keeper = _Keeper(hass)
 
-    def _on_coordinator(coord) -> None:
-        hass.async_create_task(keeper.async_reconcile(coord))
-
-        # Second pass once registries/entities have settled.
-        def _recheck(*_):
+    def _reconcile_all(*_):
+        for coord in get_coordinators(hass, entry):
             hass.async_create_task(keeper.async_reconcile(coord))
 
-        delayed = async_call_later(hass, _RECONCILE_DELAY, _recheck)
-        if entry is not None:
-            entry.async_on_unload(delayed)
-
-    async_watch_b01_coordinators(hass, _on_coordinator, entry, dedupe=False)
+    _reconcile_all()
+    # Second pass once entities have settled.
+    delayed = async_call_later(hass, _RECONCILE_DELAY, _reconcile_all)
+    if entry is not None:
+        entry.async_on_unload(delayed)

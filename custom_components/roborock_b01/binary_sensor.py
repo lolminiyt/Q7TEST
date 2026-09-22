@@ -17,7 +17,7 @@ from homeassistant.components.binary_sensor import (
 )
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN, PROTECTION_ENTITY
+from .const import PROTECTION_ENTITY
 from .issues import get_protection_status
 
 _LOGGER = logging.getLogger(__name__)
@@ -40,8 +40,8 @@ class B01ProtectionBinarySensor(BinarySensorEntity):
 
     _attr_should_poll = False
     _attr_has_entity_name = True
-    _attr_name = "Protection"
-    _attr_unique_id = f"{DOMAIN}_{PROTECTION_ENTITY}"
+    _attr_translation_key = "protection"
+    _attr_unique_id = PROTECTION_ENTITY
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
 
     def __init__(self, status) -> None:

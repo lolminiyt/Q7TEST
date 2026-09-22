@@ -8,7 +8,7 @@
 #   - vacuum.roborock_q7_bf     -> your vacuum entity id
 #   - camera.roborock_q7_bf_map -> your map camera entity id
 #   - the segment ids 16 / 17   -> your room ids (run Developer Tools ->
-#     Actions -> roborock.get_maps on your vacuum; the response lists
+#     Actions -> roborock_b01.get_maps on your vacuum; the response lists
 #     every room id + name). Wrong ids are refused before anything is
 #     sent - the error lists your real rooms, so you can copy them in.
 #
@@ -288,7 +288,7 @@ views:
           - type: markdown
             content: >-
               **Rooms** - replace the ids with yours from
-              `roborock.get_maps`, one button per room.
+              `roborock_b01.get_maps`, one button per room.
           - type: horizontal-stack
             cards:
               - type: button

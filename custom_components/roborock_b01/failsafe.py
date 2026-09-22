@@ -89,8 +89,15 @@ def _emit(event: str, command: str, err: str) -> None:
 
 
 def assert_q7_command_allowed(command) -> None:
-    """Raise BlockedCommandError if ``command`` may destroy map data."""
-    if str(command).upper() in Q7_BLOCKED_COMMANDS:
+    """Raise BlockedCommandError if ``command`` may destroy map data.
+
+    Commands arrive as ``RoborockB01Q7Methods`` enum members whose
+    ``str()`` is the wire value (``service.del_map``), not the member
+    name. Normalize both spellings: bare names (``DEL_MAP``) and wire
+    values (``service.del_map``) must hit the blocklist.
+    """
+    name = getattr(command, "name", None) or str(command)
+    if name.upper() in Q7_BLOCKED_COMMANDS:
         _emit(
             "blocked",
             str(command),

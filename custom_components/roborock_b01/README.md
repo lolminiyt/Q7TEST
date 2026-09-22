@@ -1,152 +1,136 @@
 # Roborock B01 (Q7 / Q10) Full Support for Home Assistant
 
-Custom integration that completes Home Assistant core support for
-B01-protocol vacuums (`pv=B01`: Q7 BF/TF/M5/L5, Q10 series). Every
-command and data path used here is taken from the python-roborock
-library source and its own device-verified test suite - nothing is
-guessed.
-
-**No extra login.** It reuses the authenticated session of the official
-Roborock integration (its coordinators expose the library APIs). Set up
-the official integration first.
+Standalone custom integration for B01-protocol vacuums (`pv=B01`:
+Q7 BF/TF/M5/L5, Q10 series). It logs into your Roborock account itself,
+connects your devices via the python-roborock library, and provides
+**its own vacuum entities with all controls** - the official Roborock
+integration is NOT needed and does NOT have to be installed. Every
+command and data path is taken from the python-roborock library source
+and its device-verified test suite - nothing is guessed.
 
 ## What you get
 
-On every B01 Q7 / Q10 vacuum (entities attach to the existing core
-device - no duplicates):
+Per Q7 / Q10 device (owned entities, no duplicates):
 
-- `camera.<name>_map` - **live map PNG, push-driven**. The device itself
+- `vacuum.<name>` with **full controls**:
+  - Q7: start / pause / stop / return to dock, fan speed (quiet,
+    balanced, turbo, max, max_plus), locate, room cleaning
+    (`service.set_room_clean` with the library's verified payload),
+    `get_maps`, `get_vacuum_current_position`, and the
+    `clean_settings` extras below.
+  - Q10: start / pause / stop / return to dock / spot clean, fan
+    level, locate, room cleaning, goto position, zone cleaning.
+- `camera.<name>_map` - **live map PNG, push-driven**. The device
   streams map frames over MQTT while cleaning; the integration only
-  listens. No polling, no heartbeat, no extra MQTT connection.
-- **Room cleaning** - `vacuum.clean_segments` with numeric room ids.
-  On the Q7 this is implemented with the library's verified
-  `service.set_room_clean` wrapper (`clean_type=1, ctrl_value=1,
-  room_ids=[...]`).
-- `roborock.get_maps` - current map id + room ids/names.
-- `roborock.get_vacuum_current_position` - robot x/y from the parsed
-  live map.
-- `roborock.set_vacuum_goto_position` / `set_vacuum_zoned_cleaning`:
-  **Q10 only.** Already implemented by HA core on top of the library's
-  hardware-verified `vacuum.goto_position` / `vacuum.clean_zone`
-  wrappers - this package deliberately does not touch them. On the Q7
-  these services are **not available**: the library has no wrapper for
-  Q7 point/zone cleaning and no verified payload shape exists (checked
-  upstream and community sources).
-- `roborock_b01.clean_segment` service (works even where the core
-  segment-repair UI flow is unavailable).
+  listens. No polling, no extra connection.
+- `roborock_b01.clean_settings` service (Q7) - set **suction power**
+  (quiet, balanced, turbo, max, max_plus), **water flow** (low,
+  medium, high), **clean mode** (vacuum / vac_and_mop / mop),
+  **repeat cycles** (one, two) and **cleaning route** (balanced,
+  deep). Every write is instantly reflected (post-write refresh).
+- `roborock_b01.clean_segment` service - clean rooms by numeric id,
+  with ids verified against the robot's current map before sending.
 - `binary_sensor.<name>_protection` - "on" when a command was blocked
   or the device is unreachable; attributes show the last blocked
-  command, failure details and running totals (feeds the dashboard's
-  Protection card).
-- `roborock_b01.clean_settings` service - set **suction power** (quiet,
-  balanced, turbo, max, max_plus), **water flow** (low, medium, high),
-  **clean mode** (vacuum / vac_and_mop / mop), **repeat cycles** (one,
-  two) and **cleaning route** (balanced, deep). Q7 only; every value is
-  validated with the library's own enums and sent with its verified
-  `prop.set` wrappers.
+  command, failure details and running totals.
+
+Entity behavior is a copy of HA core's Roborock vacuum classes
+(Apache-2.0, attribution in `b01_vacuum.py`), extended with the map and
+room features the official integration lacks on these models.
 
 ## Failsafes
 
-- **Bounded retries** - every device command and map read is retried
-  (2 retries with backoff) on transient failures; the cloud link is
-  MQTT and a single timeout can happen. Persistent failure still fails
-  fast with a clear error - commands are never half-applied.
+- **Bounded retries** - device commands and map reads are retried
+  (2 retries with backoff) on transient failures; persistent failure
+  fails fast with a clear translated error. Commands are never
+  half-applied.
 - **Map-protection wire guard** - the integration refuses to put any
   map-destroying command on the wire (`DEL_MAP`, `REPLACE_MAP`,
   `SET_CUR_MAP`, `RENAME_MAP`, room structure changes like
   `SPLIT_ROOM`/`ARRANGE_ROOM`/`RENAME_ROOM(S)`, schedule deletion, and
-  the unverified Q7 point/zone payloads). Blocking happens at the
-  device channel, so no integration, script or dashboard can wipe your
-  map through Home Assistant. The Roborock app is not affected.
-- **Mapping keeper is read-mostly and self-healing** - a healthy
-  mapping is only copied to backup, never rewritten. The only writes
-  are: restoring a missing mapping (always filtered against the
-  robot's *current* rooms - if they cannot be read, nothing is
-  restored: fail-closed), auto-mapping by name, and trimming away
-  room ids the robot no longer reports after a map recovery. A fully
-  stale mapping is rebuilt or dropped, with a `stale_area_mapping`
-  repair issue explaining what to do.
+  unverified Q7 point/zone payloads). The guard wraps the library's
+  channel class, so every send path is covered. The Roborock app is
+  not affected.
+- **Expired credentials heal through reauth** - no password is
+  stored: the config flow signs in once with an emailed verification
+  code and keeps the returned session blob. When MQTT later rejects
+  it, the integration starts HA's reauth flow (new code -> updated
+  entry -> reload) instead of failing silently.
+- **Mapping keeper is read-mostly and self-healing** - see below.
 
 ## "Area mapping is not configured"
 
 The built-in `vacuum.clean_area` action needs a one-time
 **segment-to-area mapping** saved in the entity registry. Open the
-vacuum entity's settings dialog in the UI (the same dialog that shows
-the segment mapping editor) and save the mapping once.
+vacuum entity's settings dialog and save the mapping once. The keeper:
 
-The integration also **protects that mapping**:
-
-- It is backed up to `.storage/roborock_b01_area_mapping` whenever it
-  exists, and **restored automatically** if the entity registry entry
-  is ever rebuilt (re-added Roborock integration, registry restore) -
-  but only against the robot's current room list, never blind.
-- If no mapping exists anywhere, rooms are **auto-mapped to HA areas
-  by name**: a robot room called "Kitchen" maps to the "Kitchen"
-  area (exact or containing match, case-insensitive, longest match
-  wins; unmatched rooms are left out rather than guessed).
-- After a **map recovery** (room ids usually change), the keeper trims
-  the stale ids, rebuilds the mapping, or - if nothing can be rebuilt -
-  removes it and raises the *Room mapping needs redoing* repair issue.
-- Watch the log for `roborock_b01: restoring segment-to-area mapping`
-  or `roborock_b01: auto-mapped robot rooms` after startup.
+- backs the mapping up to `.storage/roborock_b01_area_mapping` and
+  **restores it automatically** if the registry entry is ever rebuilt -
+  but only against the robot's current room list, never blind
+  (fail-closed);
+- **auto-maps rooms to HA areas by name** when no mapping exists
+  ("Kitchen" -> "Kitchen" area, longest match wins, unmatched rooms
+  are left out rather than guessed);
+- trims stale room ids after a map recovery, rebuilds the mapping,
+  or raises the *Room mapping needs redoing* repair issue.
 
 Meanwhile, `roborock_b01.clean_segment` cleans rooms by id with no
-mapping at all, and the dashboard in `dashboard/` ships ready-made
-room buttons that use it. Room ids are verified against the robot's
-current map before sending - unknown or stale ids are refused with the
-valid-room list instead of triggering the device's full-house fallback
-(the Q7 firmware silently cleans everything when SET_ROOM_CLEAN carries
-room ids it does not know). `vacuum.clean_area` resolves its areas into
-the same guarded path, so it can never send an unknown id either.
+mapping at all; unknown or stale ids are refused with the valid-room
+list instead of triggering the device's full-house fallback (the Q7
+firmware silently cleans everything when `SET_ROOM_CLEAN` carries
+unknown room ids).
 
 ## Install
 
-Via UI (preferred):
-
-1. Copy `custom_components/roborock_b01/` to `/config/custom_components/`
-   (or install via HACS custom repository). Requires **HA 2026.9+** —
-   older cores fail setup with a clear log (no B01 vacuum classes).
-   Note: this pins `python-roborock==7.8.1`, newer than the official
-   roborock integration's 7.1.1 (HA 2026.9); verify the official
-   integration's entities after installing.
+1. Copy `custom_components/roborock_b01/` to
+   `/config/custom_components/` (or add as a HACS custom repository).
+   Requires **HA 2026.9+** and pins `python-roborock==7.8.1` in
+   `manifest.json` (newer than the official integration's 7.1.1 -
+   needed for the B01 map parser's room extraction).
 2. Restart HA.
 3. Settings -> Devices & Services -> **Add Integration** ->
-   **Roborock B01** -> Submit. No credentials - it reuses the official
-   Roborock session.
-4. The log should show: `roborock_b01: patches applied: [...]`.
-5. Check for `camera.<your_vacuum>_map` and try room cleaning.
+   **Roborock B01** -> enter your **Roborock account email** (the same
+   you use in the Roborock app), submit, then enter the emailed
+   **verification code**.
+4. The log should show `roborock_b01: Q7.wire_guard installed` and
+   `coordinator ready for <name> (<model>)`.
+5. Check for `vacuum.<your_robot>`, `camera.<your_robot>_map` and
+   `binary_sensor.<your_robot>_protection`, then try a room clean.
 
-YAML alternative: `roborock_b01:` in `configuration.yaml` + restart.
-Use one method, not both.
+UI setup only - no YAML configuration.
 
 ## Test order
 
 1. Open the map camera, start a clean, watch it update live (pushes).
-2. Developer Tools -> Actions -> `roborock.get_maps` -> note room ids.
+2. Toggle fan speed on the vacuum card - the state reflects instantly.
 3. `roborock_b01.clean_segment` (or `vacuum.clean_segments`) with one
-   room id.
-4. `roborock.get_vacuum_current_position`.
-5. On a Q10: goto/zone (core-provided). On a Q7: not available - see
-   limits below.
+   room id from the map camera's room list.
+4. `roborock_b01.clean_settings` - change suction power / water level.
+5. On a Q10: goto / zone controls. On a Q7: not available (see limits).
 
 ## Honest limits
 
-- **Q7 goto/zone is not implemented.** No library wrapper exists and no
-  verified wire payload could be found (upstream python-roborock main
-  still lacks one; no community MQTT capture documents the shapes). If
-  you capture the payload the Roborock app sends for point/zone cleaning
-  on a Q7, please open an issue - it can then be implemented with
-  confidence.
+- **Q7 goto/zone is not implemented.** No verified wire payload exists
+  for Q7 point/zone cleaning in the library or community captures;
+  the guard blocks the unverified shapes rather than guessing.
 - B01 is **MQTT-only by design** (no local TCP for this protocol) -
-  expect ~1-2 s cloud latency on commands. That is the protocol, not a
-  bug in this package.
+  expect ~1-2 s cloud latency on commands. That is the protocol.
 - `get_maps` returns the **current** map only.
 - Empty room lists mean the map has unnamed rooms - name them in the
-  Roborock app and re-run `roborock.get_maps`.
+  Roborock app and retry.
 
 ## Files
 
-- `manifest.json` - `dependencies: ["roborock"]`, no login
-- `__init__.py` - applies patches once, registers services, loads camera
-- `vacuum.py` - all Q7/Q10 control patches (`patch_b01_vacuum_classes`)
-- `camera.py` - push-driven map cameras (library listener pattern)
+- `manifest.json` - standalone hub integration, no dependencies
+- `__init__.py` - wire guard + issue reporter + hub setup + services
+- `session.py` - stored-credential session + DeviceManager (reauth wiring)
+- `hub.py` - coordinator registry (`hass.data[DOMAIN]["coordinators"]`)
+- `coordinators.py` - Q7 poll / Q10 push-driven coordinators
+- `b01_vacuum.py` - owned Q7/Q10 vacuum entities (core copy, Apache-2.0)
+- `vacuum.py` - wire guard + room helpers (`install_q7_wire_guard`)
+- `camera.py` - push-driven map cameras
+- `binary_sensor.py` - protection sensor
+- `area_mapping.py` - backup / restore / auto-map / stale-trim keeper
+- `services.py` - `clean_segment` + `clean_settings`
+- `config_flow.py` - email-code login flow
+- `strings.json` / `translations/en.json` - UI text

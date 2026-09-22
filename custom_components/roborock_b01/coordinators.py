@@ -1,77 +1,93 @@
-"""Shared watcher for B01 coordinators of the core Roborock integration.
+"""Per-device coordinators for the standalone Roborock B01 integration.
 
-Both the map cameras and the area-mapping keeper need the same thing:
-"call me for every B01 coordinator, present and future". Coordinators
-appear when the core Roborock entry loads its runtime_data - which may
-be before or after our own setup - so discovery is: immediate scan,
-one delayed re-scan, and a dispatcher listener per core entry for
-late arrivals (deduped by duid).
+Q7: polls ``GET_PROP`` (status, wind, battery, consumables, ...) on a
+timer; the map itself is push-driven via the library's listener.
+Q10: fully push-driven - the coordinator only sends a read-only
+REQUEST_DPS kick; entities listen to the traits directly.
+
+Compatibility: the camera, area-mapping keeper and services all use
+the ``.api`` / ``.duid`` / ``.data`` / ``.async_refresh()`` surface,
+which these keep from the previous (piggyback) architecture.
 """
 
 from __future__ import annotations
 
-from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.event import async_call_later
+import logging
+from datetime import timedelta
 
-from .const import LATE_SCAN_DELAY
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from roborock.devices.device import RoborockDevice
+from roborock.exceptions import RoborockException
+from roborock.roborock_message import RoborockB01Props
 
-_ROBOROCK_DOMAIN = "roborock"
+from .const import DOMAIN, Q7_POLL_INTERVAL
+
+_LOGGER = logging.getLogger(__name__)
 
 
-@callback
-def async_watch_b01_coordinators(
-    hass: HomeAssistant,
-    on_coordinator,
-    entry=None,
-    dedupe: bool = True,
-) -> None:
-    """Invoke ``on_coordinator`` for every B01 coordinator, now and future.
+class B01Q7Coordinator(DataUpdateCoordinator):
+    """Polls Q7 properties (status/wind/battery/consumables)."""
 
-    ``on_coordinator(coord)`` is called once per duid when ``dedupe`` is
-    true (entity-style consumers); with ``dedupe=False`` every
-    appearance of a coordinator - including the same duid after the
-    core entry was removed and re-added - is delivered (reconcilers).
-    When ``entry`` is given, all listener lifetimes are bound to its
-    unload.
+    def __init__(self, hass: HomeAssistant, device: RoborockDevice) -> None:
+        self.device = device
+        self.api = device.b01_q7_properties
+        self.duid = device.duid
+        self.request_protocols = [
+            RoborockB01Props.STATUS,
+            RoborockB01Props.MAIN_BRUSH,
+            RoborockB01Props.SIDE_BRUSH,
+            RoborockB01Props.DUST_BAG_USED,
+            RoborockB01Props.MOP_LIFE,
+            RoborockB01Props.MAIN_SENSOR,
+            RoborockB01Props.CLEANING_TIME,
+            RoborockB01Props.REAL_CLEAN_TIME,
+            RoborockB01Props.HYPA,
+            RoborockB01Props.WIND,
+            RoborockB01Props.WATER,
+            RoborockB01Props.MODE,
+            RoborockB01Props.CLEAN_PATH_PREFERENCE,
+            RoborockB01Props.QUANTITY,
+        ]
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_{device.duid}",
+            update_interval=timedelta(seconds=Q7_POLL_INTERVAL),
+        )
+
+    async def _async_update_data(self):
+        try:
+            data = await self.api.query_values(self.request_protocols)
+        except RoborockException as err:
+            raise UpdateFailed(f"Q7 update failed: {err}") from err
+        if data is None:
+            raise UpdateFailed("Q7 returned no properties")
+        return data
+
+
+class B01Q10Coordinator(DataUpdateCoordinator):
+    """Kick-only coordinator for the push-driven Q10.
+
+    The Q10 streams status/map over MQTT on its own;
+    ``_async_update_data`` sends a read-only REQUEST_DPS to solicit a
+    status push and returns immediately. Entities read traits directly
+    and subscribe to trait update listeners.
     """
-    known: set[str] = set()
-    watched_entries: set[str] = set()
 
-    @callback
-    def _deliver(coord) -> None:
-        if dedupe:
-            if coord.duid in known:
-                return
-            known.add(coord.duid)
-        on_coordinator(coord)
+    def __init__(self, hass: HomeAssistant, device: RoborockDevice) -> None:
+        self.device = device
+        self.api = device.b01_q10_properties
+        self.duid = device.duid
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_{device.duid}",
+            update_interval=timedelta(seconds=Q7_POLL_INTERVAL),
+        )
 
-    @callback
-    def _scan(_now=None) -> None:
-        for rob_entry in hass.config_entries.async_entries(_ROBOROCK_DOMAIN):
-            if rob_entry.entry_id not in watched_entries:
-                watched_entries.add(rob_entry.entry_id)
-                if entry is not None:
-                    entry.async_on_unload(
-                        async_dispatcher_connect(
-                            hass,
-                            f"roborock_coordinator_added_{rob_entry.entry_id}",
-                            _deliver,
-                        )
-                    )
-            coordinators = getattr(rob_entry, "runtime_data", None)
-            if coordinators is None:
-                continue
-            # Old HA cores have no B01 coordinator lists; the vacuum-patch
-            # guard already logged that room/map features are disabled.
-            coords = list(getattr(coordinators, "b01_q7", ()) or ()) + list(
-                getattr(coordinators, "b01_q10", ()) or ()
-            )
-            for coord in coords:
-                _deliver(coord)
-
-    _scan()
-    # Re-scan once in case the core entry finished after us.
-    remove_rescan = async_call_later(hass, LATE_SCAN_DELAY, _scan)
-    if entry is not None:
-        entry.async_on_unload(remove_rescan)
+    async def _async_update_data(self):
+        try:
+            await self.api.refresh()
+        except RoborockException as err:
+            raise UpdateFailed(f"Q10 status kick failed: {err}") from err

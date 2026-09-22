@@ -14,8 +14,6 @@ Map sources (python-roborock, verified):
   ``image_content``, and kick the stream with the read-only
   ``map.refresh()`` (REQUEST_DPS) when we need a first frame.
 
-Entities attach to the existing core Roborock device
-(``identifiers={("roborock", duid)}``) - no extra device is created.
 """
 
 from __future__ import annotations
@@ -26,12 +24,7 @@ from homeassistant.components.camera import Camera
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.event import async_call_later
-from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
-
-from .const import LATE_SCAN_DELAY
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,75 +34,11 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Create map cameras for the UI config entry (proper unload support)."""
-    _async_setup_b01_cameras(hass, async_add_entities, entry)
+    """Create map cameras for every coordinator in the hub registry."""
+    from .hub import get_coordinators
 
-
-async def async_setup_platform(
-    hass: HomeAssistant,
-    config: ConfigType,
-    async_add_entities: AddEntitiesCallback,
-    discovery_info: DiscoveryInfoType | None = None,
-) -> None:
-    """Create map cameras for YAML setup (legacy fallback)."""
-    _async_setup_b01_cameras(hass, async_add_entities, None)
-
-
-def _async_setup_b01_cameras(
-    hass: HomeAssistant,
-    async_add_entities: AddEntitiesCallback,
-    entry: ConfigEntry | None,
-) -> None:
-    """Create a map camera for every B01 coordinator, present and future."""
-    known: set[str] = set()
-    watched_entries: set[str] = set()
-
-    def _add(coord) -> None:
-        if coord.duid in known:
-            return
-        known.add(coord.duid)
-        async_add_entities([B01MapCamera(coord)])
-
-    @callback
-    def _late(coord) -> None:
-        """Handle a coordinator added after our setup ran."""
-        _add(coord)
-
-    @callback
-    def _scan(_now=None) -> None:
-        """Add cameras for all known B01 coordinators."""
-        for rob_entry in hass.config_entries.async_entries("roborock"):
-            # One dispatcher subscription per core entry: _scan runs
-            # twice (immediate + delayed rescan), so without this guard
-            # each entry would end up with two live _late listeners.
-            if rob_entry.entry_id in watched_entries:
-                continue
-            watched_entries.add(rob_entry.entry_id)
-            remove_listener = async_dispatcher_connect(
-                hass,
-                f"roborock_coordinator_added_{rob_entry.entry_id}",
-                _late,
-            )
-            if entry is not None:
-                # UI mode: listener dies with our config entry.
-                entry.async_on_unload(remove_listener)
-            # YAML (legacy) mode: keep it until HA stops - same
-            # tradeoff the coordinators watcher makes.
-            coordinators = getattr(rob_entry, "runtime_data", None)
-            if coordinators is None:
-                continue
-            # Old HA cores have no B01 coordinator lists; the vacuum-patch
-            # guard already logged that room/map features are disabled.
-            for coord in list(getattr(coordinators, "b01_q7", ()) or ()):
-                _add(coord)
-            for coord in list(getattr(coordinators, "b01_q10", ()) or ()):
-                _add(coord)
-
-    _scan()
-    # Re-scan once in case the core entry finished after us.
-    remove_rescan = async_call_later(hass, LATE_SCAN_DELAY, _scan)
-    if entry is not None:
-        entry.async_on_unload(remove_rescan)
+    for coordinator in get_coordinators(hass, entry):
+        async_add_entities([B01MapCamera(coordinator)])
 
 
 class B01MapCamera(Camera):
@@ -117,7 +46,7 @@ class B01MapCamera(Camera):
 
     _attr_content_type = "image/png"
     _attr_has_entity_name = True
-    _attr_name = "Map"
+    _attr_translation_key = "map"
     _attr_should_poll = False
 
     def __init__(self, coordinator) -> None:
